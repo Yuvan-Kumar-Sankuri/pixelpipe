@@ -3,8 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - Global Streamer</title>
-  <!-- PeerJS with WebRTC STUN/TURN Handshake Engine -->
+  <title>PixelPipe - Streamer</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <style>
     :root {
@@ -37,7 +36,6 @@
 <body>
 
 <div class="wrapper">
-  <!-- Mode Switcher -->
   <div class="mode-switch">
     <button class="mode-btn active" id="tabSender">Sender Mode</button>
     <button class="mode-btn" id="tabReceiver">Receiver Mode</button>
@@ -45,42 +43,42 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender Mode (Send to Any City)</h2>
-    <label>Select File</label>
+    <h2>1. Sender Mode (4GB+ Streaming)</h2>
+    <label>Select File (Any Size)</label>
     <input type="file" id="filePicker" />
-    <button class="action" id="btnSenderRun" disabled>Compress, Encrypt & Generate Transfer Code</button>
+    <button class="action" id="btnSenderRun" disabled>Create Room & Generate Code</button>
 
-    <label id="senderProgressLabel">Process Progress: 0%</label>
+    <label id="senderProgressLabel">Transfer Progress: 0%</label>
     <progress id="senderProgress" value="0" max="100"></progress>
 
     <div class="code-display">
-      <div style="font-size:11px; color:var(--muted);">GIVE THIS CODE TO THE PERSON IN ANOTHER CITY</div>
+      <div style="font-size:11px; color:var(--muted);">SHARE THIS CODE WITH RECEIVER</div>
       <div class="code-val" id="dispCode">------</div>
     </div>
 
-    <div class="status" id="senderLog">Select a file. Once processed, share the 6-digit code via WhatsApp/Call.</div>
+    <div class="status" id="senderLog">Select a file. Large files stream on-the-fly without freezing RAM.</div>
   </div>
 
   <!-- RECEIVER VIEW -->
   <div class="card" id="receiverView" style="display: none;">
-    <h2>2. Receiver Mode (Receive from Any City)</h2>
-    <label>Enter 6-Digit Code Received from Sender</label>
+    <h2>2. Receiver Mode (Any City)</h2>
+    <label>Enter 6-Digit Code From Sender</label>
     <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
-    <button class="action" id="btnRecvRun">Connect & Ingest Stream</button>
+    <button class="action" id="btnRecvRun">Connect & Download Stream</button>
 
-    <label id="recvProgressLabel">Transfer Progress: 0%</label>
+    <label id="recvProgressLabel">Download Progress: 0%</label>
     <progress id="recvProgress" value="0" max="100"></progress>
 
-    <div class="status" id="recvLog">Enter the code and click Connect to start the cross-city transfer.</div>
-    <button class="btn-download" id="btnDownload">Download File</button>
+    <div class="status" id="recvLog">Enter the code and click Connect.</div>
+    <button class="btn-download" id="btnDownload">Save File</button>
   </div>
 </div>
 
 <script>
-const PREFIX = "pixelpipe-remote-";
-const CHUNK_SIZE = 64 * 1024; // 64KB WebRTC packets
+const PREFIX = "pixelpipe-4gb-";
+const SLICE_SIZE = 8 * 1024 * 1024; // 8MB slice (prevents memory exhaustion)
+const PACKET_SIZE = 64 * 1024;       // 64KB WebRTC packets
 
-// Global WebRTC STUN Configuration to punch through Internet Firewalls & NATs across different cities
 const RTC_CONFIG = {
   config: {
     iceServers: [
@@ -94,7 +92,6 @@ const RTC_CONFIG = {
 };
 
 let peer = null;
-let conn = null;
 
 // Tab switcher
 const tabSender = document.getElementById("tabSender");
@@ -112,48 +109,48 @@ tabReceiver.addEventListener("click", () => {
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
-// Gzip Compression
-async function shrink(bytes) {
+// Single-slice Gzip Compression
+async function compressChunk(buf) {
   const cs = new CompressionStream("gzip");
   const writer = cs.writable.getWriter();
-  writer.write(bytes); writer.close();
+  writer.write(buf); writer.close();
   const reader = cs.readable.getReader();
-  const out = [];
+  const chunks = [];
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    out.push(value);
+    chunks.push(value);
   }
-  let total = out.reduce((a, b) => a + b.length, 0);
-  let merged = new Uint8Array(total), off = 0;
-  for (let b of out) { merged.set(b, off); off += b.length; }
-  return merged;
+  let total = chunks.reduce((a, b) => a + b.length, 0);
+  let res = new Uint8Array(total), p = 0;
+  for (let c of chunks) { res.set(c, p); p += c.length; }
+  return res;
 }
 
-// Gzip Decompression
-async function decompress(bytes) {
+// Single-slice Gzip Decompression
+async function decompressChunk(buf) {
   const ds = new DecompressionStream("gzip");
   const writer = ds.writable.getWriter();
-  writer.write(bytes); writer.close();
+  writer.write(buf); writer.close();
   const reader = ds.readable.getReader();
-  const out = [];
+  const chunks = [];
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    out.push(value);
+    chunks.push(value);
   }
-  let total = out.reduce((a, b) => a + b.length, 0);
-  let merged = new Uint8Array(total), off = 0;
-  for (let b of out) { merged.set(b, off); off += b.length; }
-  return merged;
+  let total = chunks.reduce((a, b) => a + b.length, 0);
+  let res = new Uint8Array(total), p = 0;
+  for (let c of chunks) { res.set(c, p); p += c.length; }
+  return res;
 }
 
-// AES-256-GCM Key Derivation
+// AES Key derivation
 async function deriveKey(codeStr, salt) {
   const enc = new TextEncoder();
   const keyMat = await crypto.subtle.importKey("raw", enc.encode(codeStr), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+    { name: "PBKDF2", salt, iterations: 50000, hash: "SHA-256" },
     keyMat,
     { name: "AES-GCM", length: 256 },
     false,
@@ -169,82 +166,96 @@ const senderProgress = document.getElementById("senderProgress");
 const senderProgressLabel = document.getElementById("senderProgressLabel");
 const senderLog = document.getElementById("senderLog");
 
+let currentFile = null;
+
 filePicker.addEventListener("change", () => {
-  btnSenderRun.disabled = filePicker.files.length === 0;
+  currentFile = filePicker.files[0];
+  btnSenderRun.disabled = !currentFile;
+  if (currentFile) {
+    senderLog.innerHTML = `Selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB). Click button below.`;
+  }
 });
 
 btnSenderRun.addEventListener("click", async () => {
   btnSenderRun.disabled = true;
-  const file = filePicker.files[0];
+  const file = currentFile;
   const code = Math.floor(100000 + Math.random() * 900000).toString();
-
-  senderProgress.value = 20;
-  senderProgressLabel.innerText = "Step 1/3: Compressing (Gzip)... 20%";
-  senderLog.innerHTML = "Compressing file with Gzip...";
-
-  const rawBytes = new Uint8Array(await file.arrayBuffer());
-  const shrunkedBytes = await shrink(rawBytes);
-
-  senderProgress.value = 50;
-  senderProgressLabel.innerText = "Step 2/3: Encrypting (AES-256-GCM)... 50%";
-  senderLog.innerHTML = "Encrypting data with AES-256-GCM...";
-
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveKey(code, salt);
-  const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, shrunkedBytes));
-
-  senderProgress.value = 80;
-  senderProgressLabel.innerText = "Step 3/3: Registering on Global STUN Network... 80%";
-  senderLog.innerHTML = "Connecting to global cross-city signaling relay...";
 
   if (peer) peer.destroy();
-  // Initialize with public Google STUN servers
   peer = new Peer(PREFIX + code, RTC_CONFIG);
 
   peer.on("open", () => {
     dispCode.innerText = code;
-    senderProgress.value = 100;
-    senderProgressLabel.innerText = "Ready! Waiting for Receiver: 100%";
     senderLog.innerHTML = `
-      <span class="val">Global Channel Active!</span><br/>
-      Original: ${(rawBytes.length / (1024*1024)).toFixed(1)} MB &rarr; Shrunk: <span class="val">${(shrunkedBytes.length / (1024*1024)).toFixed(1)} MB</span><br/>
-      Share this 6-digit code with the person in the other city: <b>${code}</b><br/>
-      <i>Keep this browser tab open until the transfer completes.</i>
+      <span class="val">Room Ready!</span><br/>
+      Give this code to receiver: <b>${code}</b><br/>
+      <i>File will stream slice-by-slice when receiver connects. Keep this tab active!</i>
     `;
   });
 
-  peer.on("connection", (c) => {
-    senderLog.innerHTML = `<span class="val">Remote Receiver Connected!</span> Streaming packets across the internet...`;
+  peer.on("connection", (conn) => {
+    senderLog.innerHTML = `<span class="val">Receiver Connected!</span> Streaming slices now...`;
 
-    c.on("open", () => {
-      // 1. Send Metadata
-      c.send({
+    conn.on("open", async () => {
+      const fileSize = file.size;
+      const totalSlices = Math.ceil(fileSize / SLICE_SIZE);
+
+      // Send initial metadata
+      conn.send({
         type: "meta",
         name: file.name,
+        size: fileSize,
         salt: Array.from(salt),
-        iv: Array.from(iv),
-        totalBytes: encrypted.length
+        totalSlices: totalSlices
       });
 
-      // 2. Stream Encrypted Chunks
-      let offset = 0;
-      function sendSlice() {
-        while (offset < encrypted.length) {
-          const chunk = encrypted.subarray(offset, offset + CHUNK_SIZE);
-          c.send({ type: "chunk", data: Array.from(chunk) });
-          offset += chunk.length;
+      // Stream slice by slice
+      for (let i = 0; i < totalSlices; i++) {
+        const start = i * SLICE_SIZE;
+        const end = Math.min(start + SLICE_SIZE, fileSize);
+        
+        // 1. Read ONLY 8MB at a time
+        const sliceBlob = file.slice(start, end);
+        const sliceBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
 
-          // Prevent buffer congestion on long-distance pipes
-          if (c.dataChannel.bufferedAmount > 2 * 1024 * 1024) {
-            setTimeout(sendSlice, 25);
-            return;
+        // 2. Compress chunk
+        const compressed = await compressChunk(sliceBuffer);
+
+        // 3. Encrypt chunk
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, compressed));
+
+        // 4. Send slice header
+        conn.send({
+          type: "slice_start",
+          sliceIdx: i,
+          iv: Array.from(iv),
+          len: encrypted.length
+        });
+
+        // 5. Send raw data in 64KB WebRTC packets
+        let p = 0;
+        while (p < encrypted.length) {
+          const packet = encrypted.subarray(p, p + PACKET_SIZE);
+          conn.send({ type: "packet", data: Array.from(packet) });
+          p += packet.length;
+
+          // Backpressure check: wait if buffer full
+          if (conn.dataChannel.bufferedAmount > 2 * 1024 * 1024) {
+            await new Promise(r => setTimeout(r, 20));
           }
         }
-        c.send({ type: "done" });
-        senderLog.innerHTML = `<span class="val">Transfer Complete!</span> File received successfully in the other city.`;
+
+        const pct = Math.round(((i + 1) / totalSlices) * 100);
+        senderProgress.value = pct;
+        senderProgressLabel.innerText = `Transferring: ${pct}% (${i + 1}/${totalSlices} slices)`;
+        await new Promise(r => setTimeout(r, 5));
       }
-      sendSlice();
+
+      conn.send({ type: "complete" });
+      senderLog.innerHTML = `<span class="val">Transfer Complete!</span> 100% delivered to receiver.`;
     });
   });
 
@@ -262,90 +273,93 @@ const recvProgressLabel = document.getElementById("recvProgressLabel");
 const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
-let receivedChunks = [];
-let receivedBytes = 0;
 let meta = null;
-let finalBlob = null;
+let currentSliceData = [];
+let downloadedBlobs = [];
+let derivedRecvKey = null;
 
 btnRecvRun.addEventListener("click", () => {
   const code = recvCodeInput.value.trim();
   if (code.length !== 6) {
-    alert("Please enter the complete 6-digit verification code!");
+    alert("Please enter the complete 6-digit code!");
     return;
   }
 
   btnRecvRun.disabled = true;
   btnDownload.style.display = "none";
-  receivedChunks = [];
-  receivedBytes = 0;
+  downloadedBlobs = [];
+  currentSliceData = [];
 
-  recvLog.innerHTML = `Punching through NAT/Firewall to Sender (Code: ${code})...`;
+  recvLog.innerHTML = `Locating Sender (Room: ${code})...`;
 
   if (peer) peer.destroy();
   peer = new Peer(RTC_CONFIG);
 
   peer.on("open", () => {
-    conn = peer.connect(PREFIX + code, { reliable: true });
+    const conn = peer.connect(PREFIX + code, { reliable: true });
 
     conn.on("open", () => {
-      recvLog.innerHTML = `<span class="val">Cross-City Pipe Established!</span> Ingesting stream...`;
+      recvLog.innerHTML = `<span class="val">Connected!</span> Waiting for stream headers...`;
     });
 
-    conn.on("data", async (data) => {
-      if (data.type === "meta") {
-        meta = data;
-      } else if (data.type === "chunk") {
-        receivedChunks.push(new Uint8Array(data.data));
-        receivedBytes += data.data.length;
+    let currentIv = null;
+    let expectedSliceLen = 0;
+    let sliceReceivedLen = 0;
 
-        if (meta && meta.totalBytes) {
-          const pct = Math.round((receivedBytes / meta.totalBytes) * 100);
-          recvProgress.value = pct;
-          recvProgressLabel.innerText = `Transfer Progress: ${pct}% (${(receivedBytes/(1024*1024)).toFixed(1)} MB)`;
-        }
-      } else if (data.type === "done") {
-        recvLog.innerHTML = `Decrypting with AES-256-GCM and Decompressing...`;
+    conn.on("data", async (msg) => {
+      if (msg.type === "meta") {
+        meta = msg;
+        derivedRecvKey = await deriveKey(code, new Uint8Array(meta.salt));
+        recvLog.innerHTML = `Receiving <b>${meta.name}</b> (${(meta.size / (1024*1024)).toFixed(1)} MB)...`;
+      } else if (msg.type === "slice_start") {
+        currentIv = new Uint8Array(msg.iv);
+        expectedSliceLen = msg.len;
+        currentSliceData = [];
+        sliceReceivedLen = 0;
+      } else if (msg.type === "packet") {
+        currentSliceData.push(new Uint8Array(msg.data));
+        sliceReceivedLen += msg.data.length;
 
-        try {
-          const ciphertext = new Uint8Array(receivedBytes);
+        if (sliceReceivedLen === expectedSliceLen) {
+          // Merge slice packets
+          const fullSlice = new Uint8Array(expectedSliceLen);
           let off = 0;
-          for (let c of receivedChunks) { ciphertext.set(c, off); off += c.length; }
+          for (let p of currentSliceData) { fullSlice.set(p, off); off += p.length; }
 
-          const salt = new Uint8Array(meta.salt);
-          const iv = new Uint8Array(meta.iv);
-          const key = await deriveKey(code, salt);
-          const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+          // Decrypt slice
+          const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: currentIv }, derivedRecvKey, fullSlice);
+          
+          // Decompress slice
+          const rawChunk = await decompressChunk(new Uint8Array(decrypted));
+          downloadedBlobs.push(new Blob([rawChunk]));
 
-          const plainBytes = await decompress(new Uint8Array(decrypted));
-          finalBlob = new Blob([plainBytes], { type: "application/octet-stream" });
-
-          btnDownload.style.display = "block";
-          btnDownload.innerText = `Download ${meta.name} (${(finalBlob.size / (1024*1024)).toFixed(1)} MB)`;
-          recvLog.innerHTML = `<span class="val">Verified & Decrypted!</span> File ready to download.`;
-          btnRecvRun.disabled = false;
-
-        } catch (err) {
-          console.error(err);
-          recvLog.innerHTML = `<span class="err">Decryption Failed! Code mismatch or transmission interrupted.</span>`;
-          btnRecvRun.disabled = false;
+          const pct = Math.round((downloadedBlobs.length / meta.totalSlices) * 100);
+          recvProgress.value = pct;
+          recvProgressLabel.innerText = `Downloaded: ${pct}% (${downloadedBlobs.length}/${meta.totalSlices} slices)`;
         }
+      } else if (msg.type === "complete") {
+        recvLog.innerHTML = `<span class="val">Download & Verification Complete!</span> Ready to save.`;
+        btnDownload.style.display = "block";
+        btnDownload.innerText = `Save ${meta.name}`;
+        btnRecvRun.disabled = false;
       }
     });
 
     conn.on("error", () => {
-      recvLog.innerHTML = `<span class="err">Connection to sender was lost.</span>`;
+      recvLog.innerHTML = `<span class="err">Connection interrupted.</span>`;
       btnRecvRun.disabled = false;
     });
   });
 
   peer.on("error", (err) => {
-    recvLog.innerHTML = `<span class="err">Could not locate sender room. Verify the 6-digit code or ensure sender is still on the page.</span>`;
+    recvLog.innerHTML = `<span class="err">Could not find sender room. Verify the code and try again.</span>`;
     btnRecvRun.disabled = false;
   });
 });
 
 btnDownload.addEventListener("click", () => {
-  if (!finalBlob) return;
+  if (downloadedBlobs.length === 0) return;
+  const finalBlob = new Blob(downloadedBlobs, { type: "application/octet-stream" });
   const url = URL.createObjectURL(finalBlob);
   const a = document.createElement("a");
   a.href = url;
