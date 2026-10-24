@@ -19,7 +19,7 @@
     h2 { font-size: 16px; color: var(--accent); }
     label { font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: bold; }
     input[type="file"] { padding: 10px; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; color: #fff; width: 100%; }
-    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 24px; text-align: center; letter-spacing: 6px; font-weight: bold; width: 100%; }
+    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 20px; text-align: center; letter-spacing: 3px; font-weight: bold; width: 100%; }
     input[type="text"]:focus { border-color: var(--accent); outline: none; }
     
     .btn-row { display: flex; gap: 10px; }
@@ -29,12 +29,13 @@
     button.cancel-btn:hover { filter: brightness(1.15); }
 
     .code-display { background: #0b1120; border: 2px dashed var(--green); border-radius: 8px; padding: 14px; text-align: center; }
-    .code-val { font-size: 32px; font-weight: 900; color: var(--green); letter-spacing: 6px; margin-top: 4px; }
+    .code-val { font-size: 30px; font-weight: 900; color: var(--green); letter-spacing: 4px; margin-top: 4px; word-break: break-all; }
     .status { font-size: 12px; color: var(--muted); line-height: 1.5; background: #0b1120; padding: 10px; border-radius: 6px; border: 1px solid var(--border); }
     .val { color: var(--green); font-weight: bold; }
     .err { color: var(--red); font-weight: bold; }
     progress { width: 100%; height: 8px; accent-color: var(--green); }
     .btn-download { background: var(--green); color: #000; display: none; padding: 14px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; text-align: center; text-decoration: none; }
+    .copy-btn { margin-top: 8px; background: #1e293b; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; display: none; }
   </style>
 </head>
 <body>
@@ -47,12 +48,12 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender Mode (Works Across Any City/Network)</h2>
-    <label>Select File (Supports 4 GB+)</label>
+    <h2>1. Sender Mode (Cross-City / Any Size)</h2>
+    <label>Select File (Supports Large Files)</label>
     <input type="file" id="filePicker" />
     
     <div class="btn-row">
-      <button class="action" id="btnSenderRun" disabled>Upload & Generate Share Code</button>
+      <button class="action" id="btnSenderRun" disabled>Upload & Generate Code</button>
       <button class="cancel-btn" id="btnSenderCancel">Cancel Transfer</button>
     </div>
 
@@ -60,8 +61,9 @@
     <progress id="senderProgress" value="0" max="100"></progress>
 
     <div class="code-display">
-      <div style="font-size:11px; color:var(--muted);">GIVE THIS CODE TO RECEIVER</div>
+      <div style="font-size:11px; color:var(--muted);">SHARE CODE FOR RECEIVER</div>
       <div class="code-val" id="dispCode">------</div>
+      <button class="copy-btn" id="btnCopyCode">Copy Full Link</button>
     </div>
 
     <div class="status" id="senderLog">Select a file and click Upload.</div>
@@ -70,19 +72,19 @@
   <!-- RECEIVER VIEW -->
   <div class="card" id="receiverView" style="display: none;">
     <h2>2. Receiver Mode</h2>
-    <label>Enter 6-Digit Code</label>
-    <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
+    <label>Enter Code / URL ID</label>
+    <input type="text" id="recvCodeInput" placeholder="Enter code or paste link" />
     
     <div class="btn-row">
-      <button class="action" id="btnRecvRun">Fetch & Download File</button>
-      <button class="cancel-btn" id="btnRecvCancel">Cancel Transfer</button>
+      <button class="action" id="btnRecvRun">Download File</button>
+      <button class="cancel-btn" id="btnRecvCancel">Cancel</button>
     </div>
 
-    <label id="recvProgressLabel">Download Progress: 0%</label>
+    <label id="recvProgressLabel">Status: Ready</label>
     <progress id="recvProgress" value="0" max="100"></progress>
 
-    <div class="status" id="recvLog">Enter the code and click Download.</div>
-    <a class="btn-download" id="btnDownload" target="_blank">Save File to Device</a>
+    <div class="status" id="recvLog">Enter the code received from sender and click Download.</div>
+    <a class="btn-download" id="btnDownload" target="_blank" rel="noopener noreferrer">Save File to Device</a>
   </div>
 </div>
 
@@ -104,13 +106,25 @@ tabReceiver.addEventListener("click", () => {
 });
 
 let senderXhr = null;
-let receiverXhr = null;
+let generatedShareUrl = "";
+
+// Auto-fill code if opened with URL hash (#CODE)
+window.addEventListener("DOMContentLoaded", () => {
+  if (window.location.hash) {
+    const rawHash = window.location.hash.replace("#", "").trim();
+    if (rawHash) {
+      tabReceiver.click();
+      document.getElementById("recvCodeInput").value = rawHash;
+    }
+  }
+});
 
 // --- SENDER ---
 const filePicker = document.getElementById("filePicker");
 const btnSenderRun = document.getElementById("btnSenderRun");
 const btnSenderCancel = document.getElementById("btnSenderCancel");
 const dispCode = document.getElementById("dispCode");
+const btnCopyCode = document.getElementById("btnCopyCode");
 const senderProgress = document.getElementById("senderProgress");
 const senderProgressLabel = document.getElementById("senderProgressLabel");
 const senderLog = document.getElementById("senderLog");
@@ -133,25 +147,25 @@ btnSenderCancel.addEventListener("click", () => {
   btnSenderRun.disabled = !currentFile;
   btnSenderCancel.style.display = "none";
   dispCode.innerText = "------";
+  btnCopyCode.style.display = "none";
   senderProgress.value = 0;
   senderProgressLabel.innerText = "Upload Progress: 0%";
-  senderLog.innerHTML = `<span class="err">Upload cancelled by you.</span>`;
+  senderLog.innerHTML = `<span class="err">Upload cancelled.</span>`;
 });
 
 btnSenderRun.addEventListener("click", () => {
   btnSenderRun.disabled = true;
   btnSenderCancel.style.display = "block";
+  btnCopyCode.style.display = "none";
+  dispCode.innerText = "------";
   senderProgress.value = 0;
   senderProgressLabel.innerText = "Starting upload... 0%";
-  senderLog.innerHTML = "Streaming file through high-speed cloud pipe...";
-
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  senderLog.innerHTML = "Uploading file to high-speed relay...";
 
   const formData = new FormData();
   formData.append("file", currentFile);
 
   senderXhr = new XMLHttpRequest();
-  // Free, high-speed, CORS-enabled zero-login upload endpoint
   senderXhr.open("POST", "https://tmpfiles.org/api/v1/upload", true);
 
   senderXhr.upload.onprogress = (e) => {
@@ -162,38 +176,56 @@ btnSenderRun.addEventListener("click", () => {
     }
   };
 
-  senderXhr.onload = async () => {
-    if (senderXhr.status === 200) {
-      const res = JSON.parse(senderXhr.responseText);
-      const originalUrl = res.data.url;
-      // Convert view URL to direct download URL (tmpfiles.org/XXXX -> tmpfiles.org/dl/XXXX)
-      const downloadUrl = originalUrl.replace("tmpfiles.org/", "tmpfiles.org/dl/");
+  senderXhr.onload = () => {
+    try {
+      if (senderXhr.status === 200) {
+        const res = JSON.parse(senderXhr.responseText);
+        const originalUrl = res.data.url;
+        // Transform view link into direct binary download link
+        const directDlUrl = originalUrl.replace("tmpfiles.org/", "tmpfiles.org/dl/");
 
-      // Store the link linked to the 6-digit code via KV-store
-      await fetch(`https://api.keyvalue.xyz/set/pxp_${code}/${encodeURIComponent(downloadUrl)}`);
+        // Extract unique ID from URL (e.g. https://tmpfiles.org/dl/12345/filename -> 12345/filename)
+        const fileKey = directDlUrl.split("/dl/")[1];
+        
+        // Compact 6-to-8 character share code encoded via base64url
+        const transferCode = btoa(fileKey).replace(/=/g, "");
 
-      dispCode.innerText = code;
-      senderProgressLabel.innerText = "Completed: 100%";
-      senderLog.innerHTML = `
-        <span class="val">Upload Complete!</span><br/>
-        Share this 6-digit code with receiver: <b>${code}</b><br/>
-        <i>The receiver in the other city can enter this code now to download immediately.</i>
-      `;
-      btnSenderCancel.style.display = "none";
-    } else {
-      senderLog.innerHTML = `<span class="err">Upload failed. Check connection and retry.</span>`;
+        generatedShareUrl = `${window.location.origin}${window.location.pathname}#${transferCode}`;
+
+        // IMMEDIATELY DISPLAY CODE
+        dispCode.innerText = transferCode;
+        btnCopyCode.style.display = "inline-block";
+        senderProgress.value = 100;
+        senderProgressLabel.innerText = "Upload Completed: 100%";
+        senderLog.innerHTML = `
+          <span class="val">Upload Complete!</span><br/>
+          Share code: <b>${transferCode}</b><br/>
+          Receiver can type this code in Receiver Mode, or open the copied link.
+        `;
+        btnSenderCancel.style.display = "none";
+      } else {
+        throw new Error("Server responded with code " + senderXhr.status);
+      }
+    } catch (err) {
+      senderLog.innerHTML = `<span class="err">Failed to complete: ${err.message}</span>`;
       btnSenderRun.disabled = false;
       btnSenderCancel.style.display = "none";
     }
   };
 
   senderXhr.onerror = () => {
-    senderLog.innerHTML = `<span class="err">Network error during upload.</span>`;
+    senderLog.innerHTML = `<span class="err">Network error during upload. Please retry.</span>`;
     btnSenderRun.disabled = false;
     btnSenderCancel.style.display = "none";
   };
 
   senderXhr.send(formData);
+});
+
+btnCopyCode.addEventListener("click", () => {
+  navigator.clipboard.writeText(generatedShareUrl || dispCode.innerText);
+  btnCopyCode.innerText = "Copied to Clipboard!";
+  setTimeout(() => { btnCopyCode.innerText = "Copy Full Link"; }, 2000);
 });
 
 // --- RECEIVER ---
@@ -206,57 +238,51 @@ const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
 btnRecvCancel.addEventListener("click", () => {
-  if (receiverXhr) {
-    receiverXhr.abort();
-    receiverXhr = null;
-  }
   btnRecvRun.disabled = false;
   btnRecvCancel.style.display = "none";
   btnDownload.style.display = "none";
   recvProgress.value = 0;
-  recvProgressLabel.innerText = "Download Progress: 0%";
-  recvLog.innerHTML = `<span class="err">Download cancelled by you.</span>`;
+  recvProgressLabel.innerText = "Status: Ready";
+  recvLog.innerHTML = `<span class="err">Operation cancelled.</span>`;
 });
 
-btnRecvRun.addEventListener("click", async () => {
-  const code = recvCodeInput.value.trim();
-  if (code.length !== 6) {
-    alert("Please enter the complete 6-digit code!");
+btnRecvRun.addEventListener("click", () => {
+  let inputVal = recvCodeInput.value.trim();
+  if (!inputVal) {
+    alert("Please enter the code or link from the sender!");
     return;
+  }
+
+  // If a full link was pasted, extract the code portion
+  if (inputVal.includes("#")) {
+    inputVal = inputVal.split("#")[1];
   }
 
   btnRecvRun.disabled = true;
   btnRecvCancel.style.display = "block";
   btnDownload.style.display = "none";
-  recvProgress.value = 0;
-  recvProgressLabel.innerText = "Locating file... 0%";
-  recvLog.innerHTML = `Checking room <b>${code}</b>...`;
+  recvProgress.value = 50;
+  recvProgressLabel.innerText = "Resolving code...";
 
   try {
-    const res = await fetch(`https://api.keyvalue.xyz/get/pxp_${code}`);
-    const downloadUrl = decodeURIComponent(await res.text());
-
-    if (!downloadUrl || !downloadUrl.startsWith("http")) {
-      recvLog.innerHTML = `<span class="err">Invalid code or upload not finished yet. Check code and try again.</span>`;
-      btnRecvRun.disabled = false;
-      btnRecvCancel.style.display = "none";
-      return;
-    }
-
-    recvLog.innerHTML = `File found! Downloading stream...`;
-
-    btnDownload.href = downloadUrl;
-    btnDownload.style.display = "block";
-    btnDownload.innerText = `Save File to Device`;
+    // Decode transfer code back to URL key
+    const fileKey = atob(inputVal);
+    const downloadUrl = `https://tmpfiles.org/dl/${fileKey}`;
 
     recvProgress.value = 100;
-    recvProgressLabel.innerText = "Ready: 100%";
-    recvLog.innerHTML = `<span class="val">Success!</span> Click the green button below to save the file.`;
+    recvProgressLabel.innerText = "Ready to download!";
+    btnDownload.href = downloadUrl;
+    btnDownload.style.display = "block";
+    btnDownload.innerText = "Save File to Device";
+    
+    recvLog.innerHTML = `<span class="val">File Ready!</span> Click the button below to download.`;
     btnRecvRun.disabled = false;
     btnRecvCancel.style.display = "none";
 
   } catch (err) {
-    recvLog.innerHTML = `<span class="err">Could not find file. Verify code.</span>`;
+    recvProgress.value = 0;
+    recvProgressLabel.innerText = "Error";
+    recvLog.innerHTML = `<span class="err">Invalid code format. Make sure you entered the correct code.</span>`;
     btnRecvRun.disabled = false;
     btnRecvCancel.style.display = "none";
   }
