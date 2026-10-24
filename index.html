@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - High-Speed P2P Room Transfer</title>
+  <title>PixelPipe - 1-Scan Optical Handshake Streamer</title>
+  <!-- Fast QR Generator -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- Fast Browser Camera Scanner -->
+  <script src="https://unpkg.com/html5-qrcode"></script>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
@@ -19,18 +23,14 @@
     h2 { font-size: 16px; color: var(--accent); }
     label { font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: bold; }
     input[type="file"] { padding: 10px; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; color: #fff; width: 100%; }
-    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 24px; text-align: center; letter-spacing: 6px; font-weight: bold; width: 100%; }
-    input[type="text"]:focus { border-color: var(--accent); outline: none; }
     
     .btn-row { display: flex; gap: 10px; }
     button.action { flex: 1; padding: 12px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; background: var(--accent); color: #000; transition: 0.2s; }
     button.action:disabled { opacity: 0.35; cursor: not-allowed; }
     button.cancel-btn { padding: 12px 18px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; background: var(--red); color: #fff; display: none; transition: 0.2s; }
-    button.cancel-btn:hover { filter: brightness(1.15); }
 
-    .code-display { background: #0b1120; border: 2px dashed var(--green); border-radius: 8px; padding: 14px; text-align: center; }
-    .code-val { font-size: 32px; font-weight: 900; color: var(--green); letter-spacing: 6px; margin-top: 4px; }
-    .copy-link-btn { margin-top: 8px; background: #1e293b; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; display: none; }
+    .qr-box { display: flex; justify-content: center; align-items: center; background: #fff; padding: 14px; border-radius: 8px; margin: 10px auto; width: fit-content; min-height: 220px; }
+    .scanner-view { width: 100%; max-height: 260px; border-radius: 8px; overflow: hidden; display: none; margin: 10px 0; background: #000; }
 
     .status { font-size: 12px; color: var(--muted); line-height: 1.5; background: #0b1120; padding: 10px; border-radius: 6px; border: 1px solid var(--border); }
     .val { color: var(--green); font-weight: bold; }
@@ -50,46 +50,42 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender (Create Room)</h2>
+    <h2>1. Sender Mode (Displays QR Code)</h2>
     <label>Select File (Supports 4 GB+)</label>
     <input type="file" id="filePicker" />
     
     <div class="btn-row">
-      <button class="action" id="btnSenderRun" disabled>Create Room</button>
+      <button class="action" id="btnSenderRun" disabled>Generate Handshake QR</button>
       <button class="cancel-btn" id="btnSenderCancel">Cancel Transfer</button>
     </div>
 
-    <div class="code-display">
-      <div style="font-size:11px; color:var(--muted);">ROOM TRANSFER CODE</div>
-      <div class="code-val" id="dispCode">------</div>
-      <button class="copy-link-btn" id="btnCopyLink">Copy Direct Join Link</button>
-    </div>
+    <div id="senderQrContainer" class="qr-box" style="display: none;"></div>
 
     <label id="senderProgressLabel">Transfer Progress: 0%</label>
     <progress id="senderProgress" value="0" max="100"></progress>
-    <div class="status" id="senderLog">Select a file and click "Create Room" to begin.</div>
+    <div class="status" id="senderLog">Select a file and click Generate Handshake QR.</div>
   </div>
 
   <!-- RECEIVER VIEW -->
   <div class="card" id="receiverView" style="display: none;">
-    <h2>2. Receiver (Join Room)</h2>
-    <label>Enter 6-Digit Room Code</label>
-    <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
+    <h2>2. Receiver Mode (Camera Scan Only)</h2>
     
     <div class="btn-row">
-      <button class="action" id="btnRecvRun">Join Room & Stream</button>
+      <button class="action" id="btnScanQr">Scan Sender's QR Code</button>
       <button class="cancel-btn" id="btnRecvCancel">Cancel Transfer</button>
     </div>
 
-    <label id="recvProgressLabel">Download Progress: 0%</label>
+    <div id="recvScanner" class="scanner-view"></div>
+
+    <label id="recvProgressLabel">Ingestion Progress: 0%</label>
     <progress id="recvProgress" value="0" max="100"></progress>
-    <div class="status" id="recvLog">Enter the 6-digit code or open a direct join link.</div>
+    <div class="status" id="recvLog">Click Scan and point your camera at the sender's screen. That's all!</div>
     <a class="btn-download" id="btnDownload">Save File to Device</a>
   </div>
 </div>
 
 <script>
-const CHUNK_SIZE = 64 * 1024; // 64 KB native WebRTC chunk
+const CHUNK_SIZE = 16 * 1024; // 16KB WebRTC chunk
 const ICE_CONFIG = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
@@ -101,53 +97,52 @@ let pc = null;
 let dataChannel = null;
 let controlChannel = null;
 let currentFile = null;
-let roomCode = "";
-let sseSource = null;
+let html5QrScanner = null;
+let pollInterval = null;
 let isCancelled = false;
 
-// Tabs
+// UI Tabs
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
 const receiverView = document.getElementById("receiverView");
 
 tabSender.addEventListener("click", () => {
+  stopScanner();
   tabSender.classList.add("active"); tabReceiver.classList.remove("active");
   senderView.style.display = "flex"; receiverView.style.display = "none";
 });
 
 tabReceiver.addEventListener("click", () => {
+  stopScanner();
   tabReceiver.classList.add("active"); tabSender.classList.remove("active");
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
-// Auto-fill from URL hash if opened via share link
-window.addEventListener("DOMContentLoaded", () => {
-  if (window.location.hash) {
-    const hash = window.location.hash.replace("#", "").trim();
-    if (hash.length === 6) {
-      tabReceiver.click();
-      document.getElementById("recvCodeInput").value = hash;
-    }
+function stopScanner() {
+  if (html5QrScanner) {
+    html5QrScanner.stop().catch(() => {}).finally(() => { html5QrScanner = null; });
   }
-});
+  document.getElementById("recvScanner").style.display = "none";
+}
 
 function cleanup() {
-  if (sseSource) { sseSource.close(); sseSource = null; }
+  stopScanner();
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
   if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
   if (controlChannel) { try { controlChannel.close(); } catch(e){} controlChannel = null; }
   if (pc) { try { pc.close(); } catch(e){} pc = null; }
 }
 
-function pack(desc) { return JSON.stringify({ t: desc.type, s: desc.sdp }); }
-function unpack(str) { const d = JSON.parse(str); return new RTCSessionDescription({ type: d.t, s: d.s }); }
+// Minimal SDP Packager
+function packDesc(desc) { return JSON.stringify({ t: desc.type, s: desc.sdp }); }
+function unpackDesc(str) { const d = JSON.parse(str); return new RTCSessionDescription({ type: d.t, s: d.s }); }
 
-// --- SENDER ---
+// --- SENDER (SHOWS QR CODE ONLY) ---
 const filePicker = document.getElementById("filePicker");
 const btnSenderRun = document.getElementById("btnSenderRun");
 const btnSenderCancel = document.getElementById("btnSenderCancel");
-const dispCode = document.getElementById("dispCode");
-const btnCopyLink = document.getElementById("btnCopyLink");
+const senderQrContainer = document.getElementById("senderQrContainer");
 const senderProgress = document.getElementById("senderProgress");
 const senderProgressLabel = document.getElementById("senderProgressLabel");
 const senderLog = document.getElementById("senderLog");
@@ -156,7 +151,7 @@ filePicker.addEventListener("change", () => {
   currentFile = filePicker.files[0];
   btnSenderRun.disabled = !currentFile;
   if (currentFile) {
-    senderLog.innerHTML = `Selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB). Click Create Room.`;
+    senderLog.innerHTML = `File selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB). Click button below.`;
   }
 });
 
@@ -165,21 +160,16 @@ btnSenderRun.addEventListener("click", async () => {
   isCancelled = false;
   btnSenderRun.disabled = true;
   btnSenderCancel.style.display = "block";
-  btnCopyLink.style.display = "none";
-  senderProgress.value = 0;
-  senderProgressLabel.innerText = "Transfer Progress: 0%";
+  senderLog.innerHTML = "Generating 1-Scan Connection QR...";
 
-  roomCode = Math.floor(100000 + Math.random() * 900000).toString();
-  dispCode.innerText = roomCode;
-  btnCopyLink.style.display = "inline-block";
-  senderLog.innerHTML = `Setting up room <b>${roomCode}</b>...`;
+  const sessionId = Math.floor(100000 + Math.random() * 900000).toString();
 
   pc = new RTCPeerConnection(ICE_CONFIG);
 
-  dataChannel = pc.createDataChannel("pipe", { ordered: true });
+  dataChannel = pc.createDataChannel("fileStream", { ordered: true });
   dataChannel.binaryType = "arraybuffer";
 
-  controlChannel = pc.createDataChannel("ctrl", { ordered: true });
+  controlChannel = pc.createDataChannel("ctrlStream", { ordered: true });
   controlChannel.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === "cancel") {
@@ -193,44 +183,58 @@ btnSenderRun.addEventListener("click", async () => {
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  pc.onicecandidate = async () => {
+  pc.onicecandidate = () => {
     if (pc.iceGatheringState === "complete") {
-      // Broadcast offer to room topic
-      await fetch(`https://ntfy.sh/pxp_room_${roomCode}`, {
-        method: "POST",
-        body: JSON.stringify({ role: "sender", desc: pack(pc.localDescription) })
+      senderQrContainer.innerHTML = "";
+      senderQrContainer.style.display = "flex";
+
+      // Put Offer + SessionID into the QR code
+      const qrPayload = JSON.stringify({
+        id: sessionId,
+        desc: packDesc(pc.localDescription)
+      });
+
+      new QRCode(senderQrContainer, {
+        text: qrPayload,
+        width: 220,
+        height: 220,
+        correctLevel: QRCode.CorrectLevel.L
       });
 
       senderLog.innerHTML = `
-        <span class="val">Room Ready!</span><br/>
-        Share code <b>${roomCode}</b> with receiver.<br/>
-        <i>Waiting for receiver to join...</i>
+        <span class="val">QR Code Ready!</span><br/>
+        Ask the receiver to tap <b>"Scan Sender's QR Code"</b> on their device.<br/>
+        <i>Waiting for scan handshake...</i>
       `;
 
-      // Listen for receiver's answer
-      listenForAnswer(roomCode);
+      // Start silent polling for receiver's automatic answer
+      pollForAnswer(sessionId);
     }
   };
 });
 
-function listenForAnswer(code) {
-  sseSource = new EventSource(`https://ntfy.sh/pxp_room_${code}/sse`);
-  sseSource.onmessage = async (e) => {
+function pollForAnswer(sessionId) {
+  pollInterval = setInterval(async () => {
     try {
-      const data = JSON.parse(e.data);
-      if (data.event === "message" && data.message) {
-        const payload = JSON.parse(data.message);
-        if (payload.role === "receiver") {
-          sseSource.close();
-          sseSource = null;
+      const res = await fetch(`https://ntfy.sh/pxp_${sessionId}/json?poll=1`);
+      const text = await res.text();
+      if (!text) return;
 
-          senderLog.innerHTML = `<span class="val">Receiver Joined!</span> Opening direct P2P data pipe...`;
-          const answerDesc = unpack(payload.desc);
+      const lines = text.trim().split("\n");
+      for (let line of lines) {
+        const item = JSON.parse(line);
+        if (item.event === "message" && item.message) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+
+          senderLog.innerHTML = `<span class="val">Receiver Scanned!</span> Locking P2P channel...`;
+          const answerDesc = unpackDesc(item.message);
           await pc.setRemoteDescription(answerDesc);
 
           dataChannel.onopen = async () => {
-            senderLog.innerHTML = `<span class="val">Connected!</span> Streaming <b>${currentFile.name}</b>...`;
-            
+            senderQrContainer.style.display = "none";
+            senderLog.innerHTML = `<span class="val">P2P Pipe Connected!</span> Streaming file...`;
+
             controlChannel.send(JSON.stringify({
               type: "meta",
               name: currentFile.name,
@@ -260,22 +264,16 @@ function listenForAnswer(code) {
 
             if (!isCancelled) {
               controlChannel.send(JSON.stringify({ type: "complete" }));
-              senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Successfully delivered.`;
+              senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Delivered directly.`;
               btnSenderCancel.style.display = "none";
             }
           };
+          break;
         }
       }
-    } catch (err) {}
-  };
+    } catch (e) {}
+  }, 1000);
 }
-
-btnCopyLink.addEventListener("click", () => {
-  const url = `${window.location.origin}${window.location.pathname}#${roomCode}`;
-  navigator.clipboard.writeText(url);
-  btnCopyLink.innerText = "Copied Direct Link!";
-  setTimeout(() => { btnCopyLink.innerText = "Copy Direct Join Link"; }, 2000);
-});
 
 btnSenderCancel.addEventListener("click", () => {
   isCancelled = true;
@@ -283,6 +281,7 @@ btnSenderCancel.addEventListener("click", () => {
     try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
   cleanup();
+  senderQrContainer.style.display = "none";
   btnSenderRun.disabled = !currentFile;
   btnSenderCancel.style.display = "none";
   senderProgress.value = 0;
@@ -290,9 +289,8 @@ btnSenderCancel.addEventListener("click", () => {
   senderLog.innerHTML = `<span class="err">Transfer cancelled by you.</span>`;
 });
 
-// --- RECEIVER ---
-const recvCodeInput = document.getElementById("recvCodeInput");
-const btnRecvRun = document.getElementById("btnRecvRun");
+// --- RECEIVER (SCANS QR ONLY) ---
+const btnScanQr = document.getElementById("btnScanQr");
 const btnRecvCancel = document.getElementById("btnRecvCancel");
 const recvProgress = document.getElementById("recvProgress");
 const recvProgressLabel = document.getElementById("recvProgressLabel");
@@ -303,115 +301,91 @@ let receivedBuffers = [];
 let receivedTotal = 0;
 let fileMeta = null;
 
-btnRecvRun.addEventListener("click", async () => {
-  const code = recvCodeInput.value.trim();
-  if (code.length !== 6) {
-    alert("Please enter the complete 6-digit room code!");
-    return;
-  }
-
+btnScanQr.addEventListener("click", () => {
   cleanup();
   isCancelled = false;
-  btnRecvRun.disabled = true;
+  btnScanQr.style.display = "none";
   btnRecvCancel.style.display = "block";
-  btnDownload.style.display = "none";
-  receivedBuffers = [];
-  receivedTotal = 0;
-  recvProgress.value = 0;
-  recvProgressLabel.innerText = "Download Progress: 0%";
-  recvLog.innerHTML = `Looking up room <b>${code}</b>...`;
+  const scannerDiv = document.getElementById("recvScanner");
+  scannerDiv.style.display = "block";
 
-  try {
-    // Fetch sender's offer from room
-    const res = await fetch(`https://ntfy.sh/pxp_room_${code}/json?poll=1`);
-    const text = await res.text();
-    let offerDesc = null;
+  html5QrScanner = new Html5Qrcode("recvScanner");
+  html5QrScanner.start(
+    { facingMode: "environment" },
+    { fps: 10, qrbox: { width: 220, height: 220 } },
+    async (decodedText) => {
+      stopScanner();
+      recvLog.innerHTML = "<span class='val'>QR Scanned!</span> Connecting automatically...";
 
-    if (text) {
-      const lines = text.trim().split("\n");
-      for (let line of lines) {
-        try {
-          const item = JSON.parse(line);
-          if (item.event === "message" && item.message) {
-            const payload = JSON.parse(item.message);
-            if (payload.role === "sender") {
-              offerDesc = unpack(payload.desc);
-            }
-          }
-        } catch(e) {}
-      }
-    }
+      try {
+        const payload = JSON.parse(decodedText);
+        const sessionId = payload.id;
+        const offerDesc = unpackDesc(payload.desc);
 
-    if (!offerDesc) {
-      recvLog.innerHTML = `<span class="err">Room not found. Check code or ensure sender created the room first.</span>`;
-      btnRecvRun.disabled = false;
-      btnRecvCancel.style.display = "none";
-      return;
-    }
+        pc = new RTCPeerConnection(ICE_CONFIG);
 
-    pc = new RTCPeerConnection(ICE_CONFIG);
+        pc.ondatachannel = (e) => {
+          const ch = e.channel;
+          if (ch.label === "ctrlStream") {
+            controlChannel = ch;
+            controlChannel.onmessage = (ev) => {
+              const msg = JSON.parse(ev.data);
+              if (msg.type === "meta") {
+                fileMeta = msg;
+                recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024)).toFixed(1)} MB)...`;
+              } else if (msg.type === "cancel") {
+                isCancelled = true;
+                cleanup();
+                recvLog.innerHTML = `<span class="err">Transfer cancelled by sender.</span>`;
+              } else if (msg.type === "complete") {
+                recvLog.innerHTML = `<span class="val">Stream Complete!</span> Click save below.`;
+                const finalBlob = new Blob(receivedBuffers, { type: "application/octet-stream" });
+                const url = URL.createObjectURL(finalBlob);
+                btnDownload.href = url;
+                btnDownload.download = fileMeta.name;
+                btnDownload.style.display = "block";
+                btnDownload.innerText = `Save ${fileMeta.name} to Device`;
+                btnRecvCancel.style.display = "none";
+              }
+            };
+          } else if (ch.label === "fileStream") {
+            dataChannel = ch;
+            dataChannel.binaryType = "arraybuffer";
+            dataChannel.onmessage = (ev) => {
+              if (isCancelled) return;
+              receivedBuffers.push(ev.data);
+              receivedTotal += ev.data.byteLength;
 
-    pc.ondatachannel = (e) => {
-      const ch = e.channel;
-      if (ch.label === "ctrl") {
-        controlChannel = ch;
-        controlChannel.onmessage = (ev) => {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === "meta") {
-            fileMeta = msg;
-            recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024)).toFixed(1)} MB)...`;
-          } else if (msg.type === "cancel") {
-            isCancelled = true;
-            cleanup();
-            recvLog.innerHTML = `<span class="err">Transfer cancelled by sender.</span>`;
-          } else if (msg.type === "complete") {
-            recvLog.innerHTML = `<span class="val">Download Complete!</span> Click save below.`;
-            const finalBlob = new Blob(receivedBuffers, { type: "application/octet-stream" });
-            const url = URL.createObjectURL(finalBlob);
-            btnDownload.href = url;
-            btnDownload.download = fileMeta.name;
-            btnDownload.style.display = "block";
-            btnDownload.innerText = `Save ${fileMeta.name} to Device`;
-            btnRecvCancel.style.display = "none";
+              if (fileMeta && fileMeta.size) {
+                const pct = Math.round((receivedTotal / fileMeta.size) * 100);
+                recvProgress.value = pct;
+                recvProgressLabel.innerText = `Received: ${pct}% (${(receivedTotal / (1024*1024)).toFixed(1)} MB / ${(fileMeta.size / (1024*1024)).toFixed(1)} MB)`;
+              }
+            };
           }
         };
-      } else if (ch.label === "pipe") {
-        dataChannel = ch;
-        dataChannel.binaryType = "arraybuffer";
-        dataChannel.onmessage = (ev) => {
-          if (isCancelled) return;
-          receivedBuffers.push(ev.data);
-          receivedTotal += ev.data.byteLength;
 
-          if (fileMeta && fileMeta.size) {
-            const pct = Math.round((receivedTotal / fileMeta.size) * 100);
-            recvProgress.value = pct;
-            recvProgressLabel.innerText = `Received: ${pct}% (${(receivedTotal / (1024*1024)).toFixed(1)} MB / ${(fileMeta.size / (1024*1024)).toFixed(1)} MB)`;
+        await pc.setRemoteDescription(offerDesc);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        pc.onicecandidate = async () => {
+          if (pc.iceGatheringState === "complete") {
+            // Automatically transmit answer back to the sender's mailbox
+            await fetch(`https://ntfy.sh/pxp_${sessionId}`, {
+              method: "POST",
+              body: packDesc(pc.localDescription)
+            });
+            recvLog.innerHTML = `<span class="val">Handshake Completed!</span> Waiting for stream...`;
           }
         };
+
+      } catch (err) {
+        recvLog.innerHTML = `<span class="err">Invalid QR Code format. Please scan again.</span>`;
+        btnScanQr.style.display = "block";
       }
-    };
-
-    await pc.setRemoteDescription(offerDesc);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    pc.onicecandidate = async () => {
-      if (pc.iceGatheringState === "complete") {
-        // Send answer back to room
-        await fetch(`https://ntfy.sh/pxp_room_${code}`, {
-          method: "POST",
-          body: JSON.stringify({ role: "receiver", desc: pack(pc.localDescription) })
-        });
-        recvLog.innerHTML = `<span class="val">Handshake sent!</span> Connecting directly to sender...`;
-      }
-    };
-
-  } catch (err) {
-    recvLog.innerHTML = `<span class="err">Connection failed: ${err.message}</span>`;
-    btnRecvRun.disabled = false;
-    btnRecvCancel.style.display = "none";
-  }
+    }
+  );
 });
 
 btnRecvCancel.addEventListener("click", () => {
@@ -420,10 +394,10 @@ btnRecvCancel.addEventListener("click", () => {
     try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
   cleanup();
-  btnRecvRun.disabled = false;
+  btnScanQr.style.display = "block";
   btnRecvCancel.style.display = "none";
   recvProgress.value = 0;
-  recvProgressLabel.innerText = "Download Progress: 0%";
+  recvProgressLabel.innerText = "Ingestion Progress: 0%";
   recvLog.innerHTML = `<span class="err">Transfer cancelled by you.</span>`;
 });
 </script>
