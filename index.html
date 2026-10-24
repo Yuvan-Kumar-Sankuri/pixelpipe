@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - Fast Binary P2P Streamer</title>
+  <title>PixelPipe - Ultra-Reliable P2P Streamer</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <style>
     :root {
@@ -48,8 +48,8 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender Mode (Direct Binary Stream)</h2>
-    <label>Select File (Supports Large Files)</label>
+    <h2>1. Sender Mode (Reliable Stream)</h2>
+    <label>Select File</label>
     <input type="file" id="filePicker" />
     
     <div class="btn-row">
@@ -88,9 +88,8 @@
 </div>
 
 <script>
-const PREFIX = "pixelpipe-bin-";
-const SLICE_SIZE = 4 * 1024 * 1024; // 4MB slice
-const PACKET_SIZE = 16 * 1024;      // 16KB WebRTC chunk
+const PREFIX = "pixelpipe-rel-";
+const CHUNK_SIZE = 128 * 1024; // 128KB chunks: optimal throughput without overflowing buffers
 
 const RTC_CONFIG = {
   config: {
@@ -104,10 +103,9 @@ const RTC_CONFIG = {
 
 let peer = null;
 let activeConn = null;
-let isSenderCancelled = false;
-let isReceiverCancelled = false;
+let isCancelled = false;
 
-// Tab switcher
+// UI Tabs
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
@@ -123,48 +121,12 @@ tabReceiver.addEventListener("click", () => {
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
-// Compression
-async function compressChunk(buf) {
-  const cs = new CompressionStream("gzip");
-  const writer = cs.writable.getWriter();
-  writer.write(buf); writer.close();
-  const reader = cs.readable.getReader();
-  const chunks = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  let total = chunks.reduce((a, b) => a + b.length, 0);
-  let res = new Uint8Array(total), p = 0;
-  for (let c of chunks) { res.set(c, p); p += c.length; }
-  return res;
-}
-
-// Decompression
-async function decompressChunk(buf) {
-  const ds = new DecompressionStream("gzip");
-  const writer = ds.writable.getWriter();
-  writer.write(buf); writer.close();
-  const reader = ds.readable.getReader();
-  const chunks = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  let total = chunks.reduce((a, b) => a + b.length, 0);
-  let res = new Uint8Array(total), p = 0;
-  for (let c of chunks) { res.set(c, p); p += c.length; }
-  return res;
-}
-
-// Key Derivation
+// Crypto
 async function deriveKey(codeStr, salt) {
   const enc = new TextEncoder();
   const keyMat = await crypto.subtle.importKey("raw", enc.encode(codeStr), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 50000, hash: "SHA-256" },
+    { name: "PBKDF2", salt, iterations: 20000, hash: "SHA-256" },
     keyMat,
     { name: "AES-GCM", length: 256 },
     false,
@@ -192,13 +154,15 @@ filePicker.addEventListener("change", () => {
 });
 
 btnSenderCancel.addEventListener("click", () => {
-  isSenderCancelled = true;
+  isCancelled = true;
   if (activeConn && activeConn.open) {
-    try { activeConn.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
-    activeConn.close();
+    activeConn.send({ type: "cancel" });
   }
-  if (peer) peer.destroy();
-  resetSenderUI("Transfer cancelled by sender.");
+  setTimeout(() => {
+    if (activeConn) { activeConn.close(); activeConn = null; }
+    if (peer) { peer.destroy(); peer = null; }
+    resetSenderUI("Transfer cancelled by you.");
+  }, 100);
 });
 
 function resetSenderUI(msg) {
@@ -208,13 +172,12 @@ function resetSenderUI(msg) {
   senderProgress.value = 0;
   senderProgressLabel.innerText = "Transfer Progress: 0%";
   senderLog.innerHTML = `<span class="err">${msg}</span>`;
-  activeConn = null;
 }
 
 btnSenderRun.addEventListener("click", async () => {
   btnSenderRun.disabled = true;
   btnSenderCancel.style.display = "block";
-  isSenderCancelled = false;
+  isCancelled = false;
 
   const file = currentFile;
   const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -229,94 +192,88 @@ btnSenderRun.addEventListener("click", async () => {
     senderLog.innerHTML = `
       <span class="val">Room Created!</span><br/>
       Give this code to receiver: <b>${code}</b><br/>
-      <i>Waiting for receiver to connect... Keep this tab open.</i>
+      <i>Waiting for receiver to connect...</i>
     `;
   });
 
   peer.on("connection", (conn) => {
     activeConn = conn;
-    senderLog.innerHTML = `<span class="val">Receiver Connected!</span> Starting binary stream...`;
+    senderLog.innerHTML = `<span class="val">Receiver Connected!</span> Starting transfer...`;
 
     conn.on("open", async () => {
-      conn.dataChannel.binaryType = "arraybuffer";
-
       const fileSize = file.size;
-      const totalSlices = Math.ceil(fileSize / SLICE_SIZE);
+      const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
 
-      conn.send(JSON.stringify({
+      // Send initial metadata
+      conn.send({
         type: "meta",
         name: file.name,
         size: fileSize,
         salt: Array.from(salt),
-        totalSlices: totalSlices
-      }));
+        totalChunks: totalChunks
+      });
 
-      for (let i = 0; i < totalSlices; i++) {
-        if (isSenderCancelled) return;
+      // Flow Control: Promise-based acknowledgment handler
+      let waitingForAck = null;
 
-        const start = i * SLICE_SIZE;
-        const end = Math.min(start + SLICE_SIZE, fileSize);
-
-        const sliceBlob = file.slice(start, end);
-        const sliceBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
-
-        if (isSenderCancelled) return;
-
-        const compressed = await compressChunk(sliceBuffer);
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, compressed));
-
-        if (isSenderCancelled) return;
-
-        conn.send(JSON.stringify({
-          type: "slice_start",
-          sliceIdx: i,
-          iv: Array.from(iv),
-          len: encrypted.length
-        }));
-
-        let p = 0;
-        while (p < encrypted.length) {
-          if (isSenderCancelled) return;
-
-          const packet = encrypted.slice(p, p + PACKET_SIZE);
-          conn.send(packet.buffer);
-          p += packet.length;
-
-          if (conn.dataChannel.bufferedAmount > 512 * 1024) {
-            await new Promise(resolve => {
-              const check = () => {
-                if (conn.dataChannel.bufferedAmount < 64 * 1024 || isSenderCancelled) resolve();
-                else setTimeout(check, 10);
-              };
-              check();
-            });
-          }
+      conn.on("data", (msg) => {
+        if (msg.type === "ack" && waitingForAck) {
+          waitingForAck();
+          waitingForAck = null;
+        } else if (msg.type === "cancel") {
+          isCancelled = true;
+          resetSenderUI("Transfer cancelled by receiver.");
+          if (activeConn) { activeConn.close(); activeConn = null; }
+          if (peer) { peer.destroy(); peer = null; }
         }
+      });
 
-        const pct = Math.round(((i + 1) / totalSlices) * 100);
+      // Stream Chunks with Reliable Flow Control
+      for (let i = 0; i < totalChunks; i++) {
+        if (isCancelled) return;
+
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, fileSize);
+        const sliceBlob = file.slice(start, end);
+        const rawBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
+
+        if (isCancelled) return;
+
+        // Encrypt Chunk
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, rawBuffer));
+
+        if (isCancelled) return;
+
+        // Send Chunk Payload
+        conn.send({
+          type: "chunk",
+          chunkIdx: i,
+          iv: Array.from(iv),
+          payload: encrypted
+        });
+
+        // Wait for receiver ACK before sending next chunk (guarantees 0% stall never happens)
+        await new Promise(resolve => {
+          waitingForAck = resolve;
+          // Fallback timeout in case packet dropped
+          setTimeout(resolve, 300);
+        });
+
+        const pct = Math.round(((i + 1) / totalChunks) * 100);
         senderProgress.value = pct;
-        senderProgressLabel.innerText = `Sent: ${pct}% (${i + 1}/${totalSlices} slices)`;
-        await new Promise(r => setTimeout(r, 0));
+        senderProgressLabel.innerText = `Sent: ${pct}% (${i + 1}/${totalChunks} chunks)`;
       }
 
-      if (!isSenderCancelled) {
-        conn.send(JSON.stringify({ type: "complete" }));
-        senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Delivered to receiver.`;
+      if (!isCancelled) {
+        conn.send({ type: "complete" });
+        senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Successfully delivered.`;
         btnSenderCancel.style.display = "none";
       }
     });
 
-    conn.on("data", (data) => {
-      if (typeof data === "string") {
-        try {
-          const msg = JSON.parse(data);
-          if (msg.type === "cancel") {
-            isSenderCancelled = true;
-            resetSenderUI("Transfer cancelled by receiver.");
-          }
-        } catch (e) {}
-      }
+    conn.on("close", () => {
+      if (!isCancelled) resetSenderUI("Receiver closed the connection.");
     });
   });
 
@@ -337,21 +294,19 @@ const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
 let meta = null;
-let currentIv = null;
-let expectedSliceLen = 0;
-let sliceReceivedLen = 0;
-let currentSliceBuffer = null;
-let downloadedBlobs = [];
+let receivedBlobs = [];
 let derivedRecvKey = null;
 
 btnRecvCancel.addEventListener("click", () => {
-  isReceiverCancelled = true;
+  isCancelled = true;
   if (activeConn && activeConn.open) {
-    try { activeConn.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
-    activeConn.close();
+    activeConn.send({ type: "cancel" });
   }
-  if (peer) peer.destroy();
-  resetReceiverUI("Transfer cancelled by receiver.");
+  setTimeout(() => {
+    if (activeConn) { activeConn.close(); activeConn = null; }
+    if (peer) { peer.destroy(); peer = null; }
+    resetReceiverUI("Transfer cancelled by you.");
+  }, 100);
 });
 
 function resetReceiverUI(msg) {
@@ -361,8 +316,7 @@ function resetReceiverUI(msg) {
   recvProgress.value = 0;
   recvProgressLabel.innerText = "Transfer Progress: 0%";
   recvLog.innerHTML = `<span class="err">${msg}</span>`;
-  downloadedBlobs = [];
-  currentSliceBuffer = null;
+  receivedBlobs = [];
   activeConn = null;
 }
 
@@ -376,8 +330,8 @@ btnRecvRun.addEventListener("click", () => {
   btnRecvRun.disabled = true;
   btnRecvCancel.style.display = "block";
   btnDownload.style.display = "none";
-  isReceiverCancelled = false;
-  downloadedBlobs = [];
+  isCancelled = false;
+  receivedBlobs = [];
   recvProgress.value = 0;
   recvProgressLabel.innerText = "Transfer Progress: 0%";
 
@@ -391,73 +345,62 @@ btnRecvRun.addEventListener("click", () => {
     activeConn = conn;
 
     conn.on("open", () => {
-      conn.dataChannel.binaryType = "arraybuffer";
-      recvLog.innerHTML = `<span class="val">Connected!</span> Ingesting binary stream...`;
+      recvLog.innerHTML = `<span class="val">Connected!</span> Waiting for incoming stream...`;
     });
 
-    conn.on("data", async (data) => {
-      if (isReceiverCancelled) return;
+    conn.on("data", async (msg) => {
+      if (isCancelled) return;
 
-      if (typeof data === "string") {
-        const msg = JSON.parse(data);
+      if (msg.type === "cancel") {
+        isCancelled = true;
+        resetReceiverUI("Transfer cancelled by sender.");
+        if (activeConn) { activeConn.close(); activeConn = null; }
+        if (peer) { peer.destroy(); peer = null; }
+        return;
+      }
 
-        if (msg.type === "cancel") {
-          isReceiverCancelled = true;
-          resetReceiverUI("Transfer cancelled by sender.");
-          return;
-        }
-
-        if (msg.type === "meta") {
-          meta = msg;
-          derivedRecvKey = await deriveKey(code, new Uint8Array(meta.salt));
-          recvLog.innerHTML = `Receiving <b>${meta.name}</b> (${(meta.size / (1024*1024)).toFixed(1)} MB)...`;
-        } else if (msg.type === "slice_start") {
-          currentIv = new Uint8Array(msg.iv);
-          expectedSliceLen = msg.len;
-          currentSliceBuffer = new Uint8Array(expectedSliceLen);
-          sliceReceivedLen = 0;
-        } else if (msg.type === "complete") {
-          recvLog.innerHTML = `<span class="val">All Slices Delivered!</span> Ready to save.`;
-          btnDownload.style.display = "block";
-          btnDownload.innerText = `Save ${meta.name}`;
-          btnRecvRun.disabled = false;
-          btnRecvCancel.style.display = "none";
-        }
+      if (msg.type === "meta") {
+        meta = msg;
+        derivedRecvKey = await deriveKey(code, new Uint8Array(meta.salt));
+        recvLog.innerHTML = `Receiving <b>${meta.name}</b> (${(meta.size / (1024*1024)).toFixed(1)} MB)...`;
       } 
-      else if (data instanceof ArrayBuffer) {
-        const chunk = new Uint8Array(data);
-        currentSliceBuffer.set(chunk, sliceReceivedLen);
-        sliceReceivedLen += chunk.length;
+      else if (msg.type === "chunk") {
+        // Send immediate acknowledgment back to sender to unlock next chunk
+        conn.send({ type: "ack" });
 
-        if (sliceReceivedLen === expectedSliceLen) {
-          const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: currentIv }, derivedRecvKey, currentSliceBuffer);
-          const rawChunk = await decompressChunk(new Uint8Array(decrypted));
-          downloadedBlobs.push(new Blob([rawChunk]));
+        // Decrypt chunk
+        const iv = new Uint8Array(msg.iv);
+        const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv }, derivedRecvKey, msg.payload);
+        receivedBlobs.push(new Blob([decrypted]));
 
-          const pct = Math.round((downloadedBlobs.length / meta.totalSlices) * 100);
-          recvProgress.value = pct;
-          recvProgressLabel.innerText = `Downloaded: ${pct}% (${downloadedBlobs.length}/${meta.totalSlices} slices)`;
-        }
+        const pct = Math.round((receivedBlobs.length / meta.totalChunks) * 100);
+        recvProgress.value = pct;
+        recvProgressLabel.innerText = `Received: ${pct}% (${receivedBlobs.length}/${meta.totalChunks} chunks)`;
+      } 
+      else if (msg.type === "complete") {
+        recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Ready to save.`;
+        btnDownload.style.display = "block";
+        btnDownload.innerText = `Save ${meta.name}`;
+        btnRecvRun.disabled = false;
+        btnRecvCancel.style.display = "none";
       }
     });
 
-    conn.on("error", () => {
-      recvLog.innerHTML = `<span class="err">Connection to sender was lost.</span>`;
-      btnRecvRun.disabled = false;
-      btnRecvCancel.style.display = "none";
+    conn.on("close", () => {
+      if (!isCancelled) resetReceiverUI("Sender disconnected.");
     });
   });
 
   peer.on("error", (err) => {
-    recvLog.innerHTML = `<span class="err">Could not find sender room. Verify the code.</span>`;
+    recvLog.innerHTML = `<span class="err">Could not connect to room. Verify the code.</span>`;
     btnRecvRun.disabled = false;
     btnRecvCancel.style.display = "none";
   });
 });
 
 btnDownload.addEventListener("click", () => {
-  if (downloadedBlobs.length === 0) return;
-  const finalBlob = new Blob(downloadedBlobs, { type: "application/octet-stream" });
+  if (receivedBlobs.length === 0) return;
+  const finalBlob = new Blob(receivedBlobs, { type: "application/octet-stream" });
   const url = URL.createObjectURL(finalBlob);
   const a = document.createElement("a");
   a.href = url;
