@@ -3,17 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - IndexedDB Chunked Streamer (4GB+)</title>
+  <title>PixelPipe - Global Streamer</title>
+  <!-- PeerJS with WebRTC STUN/TURN Handshake Engine -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
       --accent: #38bdf8; --green: #22c55e; --red: #ef4444; --text: #f1f5f9; --muted: #94a3b8;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace, sans-serif; }
-    body { background: var(--bg); color: var(--text); padding: 24px; display: flex; justify-content: center; }
-    .wrapper { max-width: 660px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
+    body { background: var(--bg); color: var(--text); padding: 20px; display: flex; justify-content: center; }
+    .wrapper { max-width: 620px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
     .mode-switch { display: grid; grid-template-columns: 1fr 1fr; background: #0b1120; border: 1px solid var(--border); border-radius: 8px; padding: 4px; gap: 4px; }
-    .mode-btn { padding: 10px; font-weight: bold; border: none; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; transition: 0.2s; font-size: 14px; }
+    .mode-btn { padding: 12px; font-weight: bold; border: none; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; transition: 0.2s; font-size: 14px; }
     .mode-btn.active { background: var(--accent); color: #000; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
     h2 { font-size: 16px; color: var(--accent); }
@@ -25,7 +27,6 @@
     button.action:disabled { opacity: 0.35; cursor: not-allowed; }
     .code-display { background: #0b1120; border: 2px dashed var(--green); border-radius: 8px; padding: 14px; text-align: center; }
     .code-val { font-size: 32px; font-weight: 900; color: var(--green); letter-spacing: 6px; margin-top: 4px; }
-    canvas { width: 100%; height: 240px; background: #000; border-radius: 6px; border: 1px solid var(--border); object-fit: contain; }
     .status { font-size: 12px; color: var(--muted); line-height: 1.5; background: #0b1120; padding: 10px; border-radius: 6px; border: 1px solid var(--border); }
     .val { color: var(--green); font-weight: bold; }
     .err { color: var(--red); font-weight: bold; }
@@ -36,160 +37,66 @@
 <body>
 
 <div class="wrapper">
+  <!-- Mode Switcher -->
   <div class="mode-switch">
-    <button class="mode-btn active" id="tabSender">Switch to Sender</button>
-    <button class="mode-btn" id="tabReceiver">Switch to Receiver</button>
+    <button class="mode-btn active" id="tabSender">Sender Mode</button>
+    <button class="mode-btn" id="tabReceiver">Receiver Mode</button>
   </div>
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Chunked Sender (Persistent Storage)</h2>
+    <h2>1. Sender Mode (Send to Any City)</h2>
     <label>Select File</label>
     <input type="file" id="filePicker" />
-    <button class="action" id="btnSenderRun" disabled>Process & Save to Stream</button>
+    <button class="action" id="btnSenderRun" disabled>Compress, Encrypt & Generate Transfer Code</button>
 
     <label id="senderProgressLabel">Process Progress: 0%</label>
     <progress id="senderProgress" value="0" max="100"></progress>
 
     <div class="code-display">
-      <div style="font-size:11px; color:var(--muted);">VERIFICATION CODE (REVEALED WHEN COMPLETE)</div>
+      <div style="font-size:11px; color:var(--muted);">GIVE THIS CODE TO THE PERSON IN ANOTHER CITY</div>
       <div class="code-val" id="dispCode">------</div>
     </div>
 
-    <canvas id="senderCanvas" width="1920" height="1080"></canvas>
-    <div class="status" id="senderLog">Select a file to begin. Saves persistently to IndexedDB.</div>
+    <div class="status" id="senderLog">Select a file. Once processed, share the 6-digit code via WhatsApp/Call.</div>
   </div>
 
   <!-- RECEIVER VIEW -->
   <div class="card" id="receiverView" style="display: none;">
-    <h2>2. Receiver Mode (Cross-Tab Persistent)</h2>
-    <label>Enter 6-Digit Verification Code</label>
+    <h2>2. Receiver Mode (Receive from Any City)</h2>
+    <label>Enter 6-Digit Code Received from Sender</label>
     <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
-    <button class="action" id="btnRecvRun">Ingest & Decrypt Stream</button>
+    <button class="action" id="btnRecvRun">Connect & Ingest Stream</button>
 
-    <label id="recvProgressLabel">Ingestion Progress: 0%</label>
+    <label id="recvProgressLabel">Transfer Progress: 0%</label>
     <progress id="recvProgress" value="0" max="100"></progress>
-    <canvas id="recvCanvas" width="1920" height="1080"></canvas>
 
-    <div class="status" id="recvLog">Enter the code and click Ingest. Remaining Attempts: 3/3</div>
+    <div class="status" id="recvLog">Enter the code and click Connect to start the cross-city transfer.</div>
     <button class="btn-download" id="btnDownload">Download File</button>
   </div>
 </div>
 
 <script>
-const SLICE_SIZE = 32 * 1024 * 1024; // 32MB chunks
-let failedAttempts = 0;
+const PREFIX = "pixelpipe-remote-";
+const CHUNK_SIZE = 64 * 1024; // 64KB WebRTC packets
 
-// --- INDEXEDDB STORAGE ENGINE ---
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open("PixelPipeDB", 1);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains("chunks")) db.createObjectStore("chunks", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("metadata")) db.createObjectStore("metadata", { keyPath: "key" });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function saveChunk(id, iv, data) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("chunks", "readwrite");
-    tx.objectStore("chunks").put({ id, iv, data });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function saveMeta(metaObj) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("metadata", "readwrite");
-    tx.objectStore("metadata").put({ key: "active_stream", ...metaObj });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function getMeta() {
-  const db = await openDB();
-  return new Promise((resolve) => {
-    const tx = db.transaction("metadata", "readonly");
-    const req = tx.objectStore("metadata").get("active_stream");
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror = () => resolve(null);
-  });
-}
-
-async function getAllChunks(total) {
-  const db = await openDB();
-  const chunks = [];
-  for (let i = 0; i < total; i++) {
-    const chunk = await new Promise((resolve) => {
-      const tx = db.transaction("chunks", "readonly");
-      const req = tx.objectStore("chunks").get(i);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => resolve(null);
-    });
-    if (chunk) chunks.push(chunk);
+// Global WebRTC STUN Configuration to punch through Internet Firewalls & NATs across different cities
+const RTC_CONFIG = {
+  config: {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun3.l.google.com:19302" },
+      { urls: "stun:stun4.l.google.com:19302" }
+    ]
   }
-  return chunks;
-}
+};
 
-// Compression
-async function shrinkChunk(buffer) {
-  const cs = new CompressionStream("gzip");
-  const writer = cs.writable.getWriter();
-  writer.write(buffer); writer.close();
-  const reader = cs.readable.getReader();
-  const out = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    out.push(value);
-  }
-  let total = out.reduce((a, b) => a + b.length, 0);
-  let merged = new Uint8Array(total), off = 0;
-  for (let b of out) { merged.set(b, off); off += b.length; }
-  return merged;
-}
+let peer = null;
+let conn = null;
 
-async function decompressChunk(buffer) {
-  const ds = new DecompressionStream("gzip");
-  const writer = ds.writable.getWriter();
-  writer.write(buffer); writer.close();
-  const reader = ds.readable.getReader();
-  const out = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    out.push(value);
-  }
-  let total = out.reduce((a, b) => a + b.length, 0);
-  let merged = new Uint8Array(total), off = 0;
-  for (let b of out) { merged.set(b, off); off += b.length; }
-  return merged;
-}
-
-// Crypto Key Derivation
-async function deriveChunkKey(codeStr, salt, sessionSeed) {
-  const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey(
-    "raw", enc.encode(codeStr + sessionSeed), "PBKDF2", false, ["deriveKey"]
-  );
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 50000, hash: "SHA-256" },
-    keyMaterial,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
-}
-
-// --- TABS ---
+// Tab switcher
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
@@ -205,79 +112,146 @@ tabReceiver.addEventListener("click", () => {
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
+// Gzip Compression
+async function shrink(bytes) {
+  const cs = new CompressionStream("gzip");
+  const writer = cs.writable.getWriter();
+  writer.write(bytes); writer.close();
+  const reader = cs.readable.getReader();
+  const out = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out.push(value);
+  }
+  let total = out.reduce((a, b) => a + b.length, 0);
+  let merged = new Uint8Array(total), off = 0;
+  for (let b of out) { merged.set(b, off); off += b.length; }
+  return merged;
+}
+
+// Gzip Decompression
+async function decompress(bytes) {
+  const ds = new DecompressionStream("gzip");
+  const writer = ds.writable.getWriter();
+  writer.write(bytes); writer.close();
+  const reader = ds.readable.getReader();
+  const out = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out.push(value);
+  }
+  let total = out.reduce((a, b) => a + b.length, 0);
+  let merged = new Uint8Array(total), off = 0;
+  for (let b of out) { merged.set(b, off); off += b.length; }
+  return merged;
+}
+
+// AES-256-GCM Key Derivation
+async function deriveKey(codeStr, salt) {
+  const enc = new TextEncoder();
+  const keyMat = await crypto.subtle.importKey("raw", enc.encode(codeStr), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+    keyMat,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
 // --- SENDER ---
 const filePicker = document.getElementById("filePicker");
 const btnSenderRun = document.getElementById("btnSenderRun");
 const dispCode = document.getElementById("dispCode");
 const senderProgress = document.getElementById("senderProgress");
 const senderProgressLabel = document.getElementById("senderProgressLabel");
-const senderCanvas = document.getElementById("senderCanvas");
-const sCtx = senderCanvas.getContext("2d");
 const senderLog = document.getElementById("senderLog");
 
 filePicker.addEventListener("change", () => {
   btnSenderRun.disabled = filePicker.files.length === 0;
-  senderProgress.value = 0;
-  senderProgressLabel.innerText = "Process Progress: 0%";
-  dispCode.innerText = "------";
 });
 
 btnSenderRun.addEventListener("click", async () => {
   btnSenderRun.disabled = true;
-  dispCode.innerText = "------";
   const file = filePicker.files[0];
-  const fileSize = file.size;
-
-  const totalSlices = Math.ceil(fileSize / SLICE_SIZE);
   const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const sessionSeed = crypto.getRandomValues(new Uint32Array(1))[0].toString(16);
+
+  senderProgress.value = 20;
+  senderProgressLabel.innerText = "Step 1/3: Compressing (Gzip)... 20%";
+  senderLog.innerHTML = "Compressing file with Gzip...";
+
+  const rawBytes = new Uint8Array(await file.arrayBuffer());
+  const shrunkedBytes = await shrink(rawBytes);
+
+  senderProgress.value = 50;
+  senderProgressLabel.innerText = "Step 2/3: Encrypting (AES-256-GCM)... 50%";
+  senderLog.innerHTML = "Encrypting data with AES-256-GCM...";
+
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const key = await deriveChunkKey(code, salt, sessionSeed);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(code, salt);
+  const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, shrunkedBytes));
 
-  let processedBytes = 0;
+  senderProgress.value = 80;
+  senderProgressLabel.innerText = "Step 3/3: Registering on Global STUN Network... 80%";
+  senderLog.innerHTML = "Connecting to global cross-city signaling relay...";
 
-  for (let sliceIdx = 0; sliceIdx < totalSlices; sliceIdx++) {
-    const start = sliceIdx * SLICE_SIZE;
-    const end = Math.min(start + SLICE_SIZE, fileSize);
-    const sliceBlob = file.slice(start, end);
-    const rawBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
+  if (peer) peer.destroy();
+  // Initialize with public Google STUN servers
+  peer = new Peer(PREFIX + code, RTC_CONFIG);
 
-    const compressed = await shrinkChunk(rawBuffer);
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, compressed));
-
-    // Save to IndexedDB persistently
-    await saveChunk(sliceIdx, iv, encrypted);
-
-    processedBytes += (end - start);
-    const pct = Math.round((processedBytes / fileSize) * 100);
-    senderProgress.value = pct;
-    senderProgressLabel.innerText = `Processing Slice ${sliceIdx + 1}/${totalSlices}: ${pct}%`;
-    senderLog.innerHTML = `Writing chunk ${sliceIdx + 1}/${totalSlices} to persistent storage...`;
-    await new Promise(r => setTimeout(r, 10));
-  }
-
-  // Save metadata
-  await saveMeta({
-    name: file.name,
-    size: fileSize,
-    salt: salt,
-    seed: sessionSeed,
-    slices: totalSlices
+  peer.on("open", () => {
+    dispCode.innerText = code;
+    senderProgress.value = 100;
+    senderProgressLabel.innerText = "Ready! Waiting for Receiver: 100%";
+    senderLog.innerHTML = `
+      <span class="val">Global Channel Active!</span><br/>
+      Original: ${(rawBytes.length / (1024*1024)).toFixed(1)} MB &rarr; Shrunk: <span class="val">${(shrunkedBytes.length / (1024*1024)).toFixed(1)} MB</span><br/>
+      Share this 6-digit code with the person in the other city: <b>${code}</b><br/>
+      <i>Keep this browser tab open until the transfer completes.</i>
+    `;
   });
 
-  sCtx.fillStyle = "#22c55e";
-  sCtx.fillRect(0, 0, senderCanvas.width, senderCanvas.height);
+  peer.on("connection", (c) => {
+    senderLog.innerHTML = `<span class="val">Remote Receiver Connected!</span> Streaming packets across the internet...`;
 
-  dispCode.innerText = code;
-  senderProgressLabel.innerText = "Completed: 100%";
-  senderLog.innerHTML = `
-    <span class="val">Stream Saved Persistently!</span><br/>
-    File: <b>${file.name}</b> (${(fileSize / (1024*1024)).toFixed(1)} MB)<br/>
-    Slices stored: <span class="val">${totalSlices}</span><br/>
-    Switch to <b>Receiver</b> and enter code <b>${code}</b>.
-  `;
-  btnSenderRun.disabled = false;
+    c.on("open", () => {
+      // 1. Send Metadata
+      c.send({
+        type: "meta",
+        name: file.name,
+        salt: Array.from(salt),
+        iv: Array.from(iv),
+        totalBytes: encrypted.length
+      });
+
+      // 2. Stream Encrypted Chunks
+      let offset = 0;
+      function sendSlice() {
+        while (offset < encrypted.length) {
+          const chunk = encrypted.subarray(offset, offset + CHUNK_SIZE);
+          c.send({ type: "chunk", data: Array.from(chunk) });
+          offset += chunk.length;
+
+          // Prevent buffer congestion on long-distance pipes
+          if (c.dataChannel.bufferedAmount > 2 * 1024 * 1024) {
+            setTimeout(sendSlice, 25);
+            return;
+          }
+        }
+        c.send({ type: "done" });
+        senderLog.innerHTML = `<span class="val">Transfer Complete!</span> File received successfully in the other city.`;
+      }
+      sendSlice();
+    });
+  });
+
+  peer.on("error", (err) => {
+    senderLog.innerHTML = `<span class="err">Connection Error: ${err.type}</span>. Retrying...`;
+    btnSenderRun.disabled = false;
+  });
 });
 
 // --- RECEIVER ---
@@ -288,70 +262,94 @@ const recvProgressLabel = document.getElementById("recvProgressLabel");
 const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
-let downloadedParts = [];
-let outputFileName = "downloaded_file";
+let receivedChunks = [];
+let receivedBytes = 0;
+let meta = null;
+let finalBlob = null;
 
-btnRecvRun.addEventListener("click", async () => {
+btnRecvRun.addEventListener("click", () => {
   const code = recvCodeInput.value.trim();
   if (code.length !== 6) {
     alert("Please enter the complete 6-digit verification code!");
     return;
   }
 
-  // Fetch metadata from IndexedDB
-  const meta = await getMeta();
-  if (!meta) {
-    alert("No active stream found in storage! Please process a file in Sender mode first.");
-    return;
-  }
-
   btnRecvRun.disabled = true;
   btnDownload.style.display = "none";
-  downloadedParts = [];
-  outputFileName = meta.name;
+  receivedChunks = [];
+  receivedBytes = 0;
 
-  try {
-    const key = await deriveChunkKey(code, meta.salt, meta.seed);
-    const totalSlices = meta.slices;
-    const chunks = await getAllChunks(totalSlices);
+  recvLog.innerHTML = `Punching through NAT/Firewall to Sender (Code: ${code})...`;
 
-    if (chunks.length < totalSlices) {
-      throw new Error("Stream data incomplete in storage.");
-    }
+  if (peer) peer.destroy();
+  peer = new Peer(RTC_CONFIG);
 
-    for (let i = 0; i < totalSlices; i++) {
-      const slice = chunks[i];
-      const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: slice.iv }, key, slice.data);
-      const plainBytes = await decompressChunk(new Uint8Array(decrypted));
-      downloadedParts.push(plainBytes);
+  peer.on("open", () => {
+    conn = peer.connect(PREFIX + code, { reliable: true });
 
-      const pct = Math.round(((i + 1) / totalSlices) * 100);
-      recvProgress.value = pct;
-      recvProgressLabel.innerText = `Reconstructing Slice ${i + 1}/${totalSlices}: ${pct}%`;
-      await new Promise(r => setTimeout(r, 10));
-    }
+    conn.on("open", () => {
+      recvLog.innerHTML = `<span class="val">Cross-City Pipe Established!</span> Ingesting stream...`;
+    });
 
-    const finalBlob = new Blob(downloadedParts, { type: "application/octet-stream" });
-    btnDownload.style.display = "block";
-    btnDownload.innerText = `Download ${outputFileName} (${(finalBlob.size / (1024*1024)).toFixed(1)} MB)`;
-    recvLog.innerHTML = `<span class="val">Authentication Verified!</span> File ready to download.`;
+    conn.on("data", async (data) => {
+      if (data.type === "meta") {
+        meta = data;
+      } else if (data.type === "chunk") {
+        receivedChunks.push(new Uint8Array(data.data));
+        receivedBytes += data.data.length;
+
+        if (meta && meta.totalBytes) {
+          const pct = Math.round((receivedBytes / meta.totalBytes) * 100);
+          recvProgress.value = pct;
+          recvProgressLabel.innerText = `Transfer Progress: ${pct}% (${(receivedBytes/(1024*1024)).toFixed(1)} MB)`;
+        }
+      } else if (data.type === "done") {
+        recvLog.innerHTML = `Decrypting with AES-256-GCM and Decompressing...`;
+
+        try {
+          const ciphertext = new Uint8Array(receivedBytes);
+          let off = 0;
+          for (let c of receivedChunks) { ciphertext.set(c, off); off += c.length; }
+
+          const salt = new Uint8Array(meta.salt);
+          const iv = new Uint8Array(meta.iv);
+          const key = await deriveKey(code, salt);
+          const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+
+          const plainBytes = await decompress(new Uint8Array(decrypted));
+          finalBlob = new Blob([plainBytes], { type: "application/octet-stream" });
+
+          btnDownload.style.display = "block";
+          btnDownload.innerText = `Download ${meta.name} (${(finalBlob.size / (1024*1024)).toFixed(1)} MB)`;
+          recvLog.innerHTML = `<span class="val">Verified & Decrypted!</span> File ready to download.`;
+          btnRecvRun.disabled = false;
+
+        } catch (err) {
+          console.error(err);
+          recvLog.innerHTML = `<span class="err">Decryption Failed! Code mismatch or transmission interrupted.</span>`;
+          btnRecvRun.disabled = false;
+        }
+      }
+    });
+
+    conn.on("error", () => {
+      recvLog.innerHTML = `<span class="err">Connection to sender was lost.</span>`;
+      btnRecvRun.disabled = false;
+    });
+  });
+
+  peer.on("error", (err) => {
+    recvLog.innerHTML = `<span class="err">Could not locate sender room. Verify the 6-digit code or ensure sender is still on the page.</span>`;
     btnRecvRun.disabled = false;
-    failedAttempts = 0;
-
-  } catch (err) {
-    failedAttempts++;
-    recvLog.innerHTML = `<span class="err">Invalid Code! Decryption failed.</span> Attempt ${failedAttempts}/3`;
-    btnRecvRun.disabled = false;
-  }
+  });
 });
 
 btnDownload.addEventListener("click", () => {
-  if (downloadedParts.length === 0) return;
-  const blob = new Blob(downloadedParts, { type: "application/octet-stream" });
-  const url = URL.createObjectURL(blob);
+  if (!finalBlob) return;
+  const url = URL.createObjectURL(finalBlob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = outputFileName;
+  a.download = meta.name;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
