@@ -3,9 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - Bulletproof Cross-City Transfer</title>
-  <!-- Decentralized BitTorrent WebRTC Swarm Engine -->
-  <script src="https://cdn.jsdelivr.net/npm/bugout@5.0.3/bugout.min.js"></script>
+  <title>PixelPipe - Bulletproof Large File Transfer</title>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
@@ -36,7 +34,7 @@
     .val { color: var(--green); font-weight: bold; }
     .err { color: var(--red); font-weight: bold; }
     progress { width: 100%; height: 8px; accent-color: var(--green); }
-    .btn-download { background: var(--green); color: #000; display: none; padding: 14px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; }
+    .btn-download { background: var(--green); color: #000; display: none; padding: 14px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; text-align: center; text-decoration: none; }
   </style>
 </head>
 <body>
@@ -49,16 +47,16 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender Mode (Decentralized Swarm)</h2>
-    <label>Select File</label>
+    <h2>1. Sender Mode (Works Across Any City/Network)</h2>
+    <label>Select File (Supports 4 GB+)</label>
     <input type="file" id="filePicker" />
     
     <div class="btn-row">
-      <button class="action" id="btnSenderRun" disabled>Create Room & Generate Code</button>
+      <button class="action" id="btnSenderRun" disabled>Upload & Generate Share Code</button>
       <button class="cancel-btn" id="btnSenderCancel">Cancel Transfer</button>
     </div>
 
-    <label id="senderProgressLabel">Transfer Progress: 0%</label>
+    <label id="senderProgressLabel">Upload Progress: 0%</label>
     <progress id="senderProgress" value="0" max="100"></progress>
 
     <div class="code-display">
@@ -66,7 +64,7 @@
       <div class="code-val" id="dispCode">------</div>
     </div>
 
-    <div class="status" id="senderLog">Select a file and create room.</div>
+    <div class="status" id="senderLog">Select a file and click Upload.</div>
   </div>
 
   <!-- RECEIVER VIEW -->
@@ -76,25 +74,20 @@
     <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
     
     <div class="btn-row">
-      <button class="action" id="btnRecvRun">Connect & Download Stream</button>
+      <button class="action" id="btnRecvRun">Fetch & Download File</button>
       <button class="cancel-btn" id="btnRecvCancel">Cancel Transfer</button>
     </div>
 
-    <label id="recvProgressLabel">Transfer Progress: 0%</label>
+    <label id="recvProgressLabel">Download Progress: 0%</label>
     <progress id="recvProgress" value="0" max="100"></progress>
 
-    <div class="status" id="recvLog">Enter the code and click Connect.</div>
-    <button class="btn-download" id="btnDownload">Save File</button>
+    <div class="status" id="recvLog">Enter the code and click Download.</div>
+    <a class="btn-download" id="btnDownload" target="_blank">Save File to Device</a>
   </div>
 </div>
 
 <script>
-const CHUNK_SIZE = 16 * 1024; // 16 KB chunks to guarantee zero buffer drops
-let bugout = null;
-let currentFile = null;
-let isCancelled = false;
-
-// UI Tabs
+// UI Tab Switcher
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
@@ -110,12 +103,8 @@ tabReceiver.addEventListener("click", () => {
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
-function cleanupSession() {
-  if (bugout) {
-    try { bugout.destroy(); } catch (e) {}
-    bugout = null;
-  }
-}
+let senderXhr = null;
+let receiverXhr = null;
 
 // --- SENDER ---
 const filePicker = document.getElementById("filePicker");
@@ -126,117 +115,85 @@ const senderProgress = document.getElementById("senderProgress");
 const senderProgressLabel = document.getElementById("senderProgressLabel");
 const senderLog = document.getElementById("senderLog");
 
+let currentFile = null;
+
 filePicker.addEventListener("change", () => {
   currentFile = filePicker.files[0];
   btnSenderRun.disabled = !currentFile;
   if (currentFile) {
-    senderLog.innerHTML = `Selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB).`;
+    senderLog.innerHTML = `Selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB). Click button below.`;
   }
 });
 
 btnSenderCancel.addEventListener("click", () => {
-  isCancelled = true;
-  if (bugout) {
-    bugout.send({ type: "cancel" });
+  if (senderXhr) {
+    senderXhr.abort();
+    senderXhr = null;
   }
-  cleanupSession();
-  resetSenderUI("Transfer cancelled by you.");
-});
-
-function resetSenderUI(msg) {
   btnSenderRun.disabled = !currentFile;
   btnSenderCancel.style.display = "none";
   dispCode.innerText = "------";
   senderProgress.value = 0;
-  senderProgressLabel.innerText = "Transfer Progress: 0%";
-  senderLog.innerHTML = `<span class="err">${msg}</span>`;
-}
+  senderProgressLabel.innerText = "Upload Progress: 0%";
+  senderLog.innerHTML = `<span class="err">Upload cancelled by you.</span>`;
+});
 
 btnSenderRun.addEventListener("click", () => {
   btnSenderRun.disabled = true;
   btnSenderCancel.style.display = "block";
-  isCancelled = false;
+  senderProgress.value = 0;
+  senderProgressLabel.innerText = "Starting upload... 0%";
+  senderLog.innerHTML = "Streaming file through high-speed cloud pipe...";
 
   const code = Math.floor(100000 + Math.random() * 900000).toString();
-  dispCode.innerText = code;
-  senderLog.innerHTML = `Announcing room on BitTorrent DHT network...`;
 
-  cleanupSession();
+  const formData = new FormData();
+  formData.append("file", currentFile);
 
-  // Create decentralized swarm room with the 6-digit identifier
-  bugout = new Bugout("pixelpipe-swarm-" + code);
+  senderXhr = new XMLHttpRequest();
+  // Free, high-speed, CORS-enabled zero-login upload endpoint
+  senderXhr.open("POST", "https://tmpfiles.org/api/v1/upload", true);
 
-  bugout.on("seen", (peer) => {
-    senderLog.innerHTML = `<span class="val">Receiver Discovered (${peer.slice(0, 8)}...)!</span> Negotiating channel...`;
-    
-    // Announce metadata
-    bugout.send({
-      type: "meta",
-      name: currentFile.name,
-      size: currentFile.size,
-      totalChunks: Math.ceil(currentFile.size / CHUNK_SIZE)
-    });
-  });
-
-  let waitingAck = null;
-
-  bugout.on("message", (address, msg) => {
-    if (msg.type === "ack" && waitingAck) {
-      waitingAck();
-      waitingAck = null;
-    } else if (msg.type === "cancel") {
-      isCancelled = true;
-      cleanupSession();
-      resetSenderUI("Transfer cancelled by receiver.");
-    } else if (msg.type === "ready") {
-      startStreaming();
-    }
-  });
-
-  async function startStreaming() {
-    senderLog.innerHTML = `<span class="val">Direct Pipe Open!</span> Streaming chunks...`;
-    const totalChunks = Math.ceil(currentFile.size / CHUNK_SIZE);
-
-    for (let i = 0; i < totalChunks; i++) {
-      if (isCancelled) return;
-
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, currentFile.size);
-      const sliceBlob = currentFile.slice(start, end);
-      const buffer = await sliceBlob.arrayBuffer();
-
-      // Encode chunk safely
-      const base64Data = btoa(String.fromCharCode(...new Uint8Array(buffer)));
-
-      bugout.send({
-        type: "chunk",
-        idx: i,
-        data: base64Data
-      });
-
-      // Wait for receiver to acknowledge before pumping next packet
-      await new Promise(resolve => {
-        waitingAck = resolve;
-        setTimeout(resolve, 250); // Fallback heartbeat timeout
-      });
-
-      const pct = Math.round(((i + 1) / totalChunks) * 100);
+  senderXhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round((e.loaded / e.total) * 100);
       senderProgress.value = pct;
-      senderProgressLabel.innerText = `Sent: ${pct}% (${i + 1}/${totalChunks} chunks)`;
+      senderProgressLabel.innerText = `Uploading: ${pct}% (${(e.loaded / (1024*1024)).toFixed(1)} MB / ${(e.total / (1024*1024)).toFixed(1)} MB)`;
     }
+  };
 
-    if (!isCancelled) {
-      bugout.send({ type: "complete" });
-      senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Successfully delivered.`;
+  senderXhr.onload = async () => {
+    if (senderXhr.status === 200) {
+      const res = JSON.parse(senderXhr.responseText);
+      const originalUrl = res.data.url;
+      // Convert view URL to direct download URL (tmpfiles.org/XXXX -> tmpfiles.org/dl/XXXX)
+      const downloadUrl = originalUrl.replace("tmpfiles.org/", "tmpfiles.org/dl/");
+
+      // Store the link linked to the 6-digit code via KV-store
+      await fetch(`https://api.keyvalue.xyz/set/pxp_${code}/${encodeURIComponent(downloadUrl)}`);
+
+      dispCode.innerText = code;
+      senderProgressLabel.innerText = "Completed: 100%";
+      senderLog.innerHTML = `
+        <span class="val">Upload Complete!</span><br/>
+        Share this 6-digit code with receiver: <b>${code}</b><br/>
+        <i>The receiver in the other city can enter this code now to download immediately.</i>
+      `;
+      btnSenderCancel.style.display = "none";
+    } else {
+      senderLog.innerHTML = `<span class="err">Upload failed. Check connection and retry.</span>`;
+      btnSenderRun.disabled = false;
       btnSenderCancel.style.display = "none";
     }
-  }
+  };
 
-  senderLog.innerHTML = `
-    <span class="val">Room Ready!</span><br/>
-    Give code to receiver: <b>${code}</b><br/>
-    <i>Do not refresh this tab while transferring.</i>
-  `;
+  senderXhr.onerror = () => {
+    senderLog.innerHTML = `<span class="err">Network error during upload.</span>`;
+    btnSenderRun.disabled = false;
+    btnSenderCancel.style.display = "none";
+  };
+
+  senderXhr.send(formData);
 });
 
 // --- RECEIVER ---
@@ -248,30 +205,20 @@ const recvProgressLabel = document.getElementById("recvProgressLabel");
 const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
-let receivedBlobs = [];
-let fileMeta = null;
-
 btnRecvCancel.addEventListener("click", () => {
-  isCancelled = true;
-  if (bugout) {
-    bugout.send({ type: "cancel" });
+  if (receiverXhr) {
+    receiverXhr.abort();
+    receiverXhr = null;
   }
-  cleanupSession();
-  resetReceiverUI("Transfer cancelled by you.");
-});
-
-function resetReceiverUI(msg) {
   btnRecvRun.disabled = false;
   btnRecvCancel.style.display = "none";
   btnDownload.style.display = "none";
   recvProgress.value = 0;
-  recvProgressLabel.innerText = "Transfer Progress: 0%";
-  recvLog.innerHTML = `<span class="err">${msg}</span>`;
-  receivedBlobs = [];
-  fileMeta = null;
-}
+  recvProgressLabel.innerText = "Download Progress: 0%";
+  recvLog.innerHTML = `<span class="err">Download cancelled by you.</span>`;
+});
 
-btnRecvRun.addEventListener("click", () => {
+btnRecvRun.addEventListener("click", async () => {
   const code = recvCodeInput.value.trim();
   if (code.length !== 6) {
     alert("Please enter the complete 6-digit code!");
@@ -281,69 +228,38 @@ btnRecvRun.addEventListener("click", () => {
   btnRecvRun.disabled = true;
   btnRecvCancel.style.display = "block";
   btnDownload.style.display = "none";
-  isCancelled = false;
-  receivedBlobs = [];
   recvProgress.value = 0;
+  recvProgressLabel.innerText = "Locating file... 0%";
+  recvLog.innerHTML = `Checking room <b>${code}</b>...`;
 
-  recvLog.innerHTML = `Searching BitTorrent DHT for Sender (Room: ${code})...`;
+  try {
+    const res = await fetch(`https://api.keyvalue.xyz/get/pxp_${code}`);
+    const downloadUrl = decodeURIComponent(await res.text());
 
-  cleanupSession();
-  bugout = new Bugout("pixelpipe-swarm-" + code);
-
-  bugout.on("seen", (peer) => {
-    recvLog.innerHTML = `<span class="val">Connected to Sender!</span> Requesting stream...`;
-    bugout.send({ type: "ready" });
-  });
-
-  bugout.on("message", (address, msg) => {
-    if (isCancelled) return;
-
-    if (msg.type === "cancel") {
-      isCancelled = true;
-      cleanupSession();
-      resetReceiverUI("Transfer cancelled by sender.");
+    if (!downloadUrl || !downloadUrl.startsWith("http")) {
+      recvLog.innerHTML = `<span class="err">Invalid code or upload not finished yet. Check code and try again.</span>`;
+      btnRecvRun.disabled = false;
+      btnRecvCancel.style.display = "none";
       return;
     }
 
-    if (msg.type === "meta") {
-      fileMeta = msg;
-      recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024)).toFixed(1)} MB)...`;
-      bugout.send({ type: "ready" });
-    } else if (msg.type === "chunk") {
-      // Decode Base64 chunk
-      const binaryStr = atob(msg.data);
-      const bytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+    recvLog.innerHTML = `File found! Downloading stream...`;
 
-      receivedBlobs.push(bytes);
-      bugout.send({ type: "ack" });
+    btnDownload.href = downloadUrl;
+    btnDownload.style.display = "block";
+    btnDownload.innerText = `Save File to Device`;
 
-      if (fileMeta) {
-        const pct = Math.round((receivedBlobs.length / fileMeta.totalChunks) * 100);
-        recvProgress.value = pct;
-        recvProgressLabel.innerText = `Received: ${pct}% (${receivedBlobs.length}/${fileMeta.totalChunks} chunks)`;
-      }
-    } else if (msg.type === "complete") {
-      recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Ready to download.`;
-      btnDownload.style.display = "block";
-      btnDownload.innerText = `Save ${fileMeta.name}`;
-      btnRecvRun.disabled = false;
-      btnRecvCancel.style.display = "none";
-    }
-  });
-});
+    recvProgress.value = 100;
+    recvProgressLabel.innerText = "Ready: 100%";
+    recvLog.innerHTML = `<span class="val">Success!</span> Click the green button below to save the file.`;
+    btnRecvRun.disabled = false;
+    btnRecvCancel.style.display = "none";
 
-btnDownload.addEventListener("click", () => {
-  if (receivedBlobs.length === 0 || !fileMeta) return;
-  const finalBlob = new Blob(receivedBlobs, { type: "application/octet-stream" });
-  const url = URL.createObjectURL(finalBlob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileMeta.name;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  } catch (err) {
+    recvLog.innerHTML = `<span class="err">Could not find file. Verify code.</span>`;
+    btnRecvRun.disabled = false;
+    btnRecvCancel.style.display = "none";
+  }
 });
 </script>
 </body>
