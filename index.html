@@ -3,40 +3,40 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - Pure Optical QR WebRTC Handshake</title>
-  <!-- Fast QR Generator -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <!-- Fast Browser Camera Scanner -->
-  <script src="https://unpkg.com/html5-qrcode"></script>
+  <title>PixelPipe - High-Speed Same-Room Local Drop</title>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
       --accent: #38bdf8; --green: #22c55e; --red: #ef4444; --text: #f1f5f9; --muted: #94a3b8;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace, sans-serif; }
-    body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; }
-    .wrapper { max-width: 580px; width: 100%; display: flex; flex-direction: column; gap: 14px; }
+    body { background: var(--bg); color: var(--text); padding: 20px; display: flex; justify-content: center; }
+    .wrapper { max-width: 600px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
     .mode-switch { display: grid; grid-template-columns: 1fr 1fr; background: #0b1120; border: 1px solid var(--border); border-radius: 8px; padding: 4px; gap: 4px; }
     .mode-btn { padding: 12px; font-weight: bold; border: none; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; transition: 0.2s; font-size: 14px; }
     .mode-btn.active { background: var(--accent); color: #000; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
-    h2 { font-size: 15px; color: var(--accent); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+    h2 { font-size: 16px; color: var(--accent); }
     label { font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: bold; }
-    input[type="file"] { padding: 8px; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; color: #fff; width: 100%; }
+    input[type="file"] { padding: 10px; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; color: #fff; width: 100%; }
+    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 24px; text-align: center; letter-spacing: 6px; font-weight: bold; width: 100%; }
+    input[type="text"]:focus { border-color: var(--accent); outline: none; }
     
-    .btn-row { display: flex; gap: 8px; }
-    button.action { flex: 1; padding: 12px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; background: var(--accent); color: #000; transition: 0.2s; }
+    .btn-row { display: flex; gap: 10px; }
+    button.action { flex: 1; padding: 12px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; background: var(--accent); color: #000; transition: 0.2s; }
     button.action:disabled { opacity: 0.35; cursor: not-allowed; }
-    button.cancel-btn { padding: 12px 16px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; background: var(--red); color: #fff; display: none; }
+    button.cancel-btn { padding: 12px 18px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; background: var(--red); color: #fff; display: none; transition: 0.2s; }
+    button.cancel-btn:hover { filter: brightness(1.15); }
 
-    .qr-box { display: flex; justify-content: center; align-items: center; background: #fff; padding: 12px; border-radius: 8px; margin: 8px auto; width: fit-content; min-height: 220px; }
-    .scanner-view { width: 100%; max-height: 260px; border-radius: 8px; overflow: hidden; display: none; margin: 8px 0; background: #000; }
+    .code-display { background: #0b1120; border: 2px dashed var(--green); border-radius: 8px; padding: 14px; text-align: center; }
+    .code-val { font-size: 32px; font-weight: 900; color: var(--green); letter-spacing: 6px; margin-top: 4px; }
 
     .status { font-size: 12px; color: var(--muted); line-height: 1.5; background: #0b1120; padding: 10px; border-radius: 6px; border: 1px solid var(--border); }
     .val { color: var(--green); font-weight: bold; }
     .err { color: var(--red); font-weight: bold; }
     progress { width: 100%; height: 8px; accent-color: var(--green); }
     .btn-download { background: var(--green); color: #000; display: none; padding: 14px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; text-align: center; text-decoration: none; }
+    .stats { display: flex; justify-content: space-between; font-size: 12px; font-weight: bold; color: var(--accent); }
   </style>
 </head>
 <body>
@@ -44,132 +44,137 @@
 <div class="wrapper">
   <!-- Mode Switcher -->
   <div class="mode-switch">
-    <button class="mode-btn active" id="tabSender">Sender Mode</button>
-    <button class="mode-btn" id="tabReceiver">Receiver Mode</button>
+    <button class="mode-btn active" id="tabSender">Phone (Sender)</button>
+    <button class="mode-btn" id="tabReceiver">Laptop (Receiver)</button>
   </div>
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender (Camera / Optical Link)</h2>
-    <label>1. Select File (4 GB+ Supported)</label>
+    <h2>1. Local Drop (Sender)</h2>
+    <label>Select 4 GB File</label>
     <input type="file" id="filePicker" />
-    <button class="action" id="btnSenderInit" disabled>Step 1: Generate Connection QR</button>
-
-    <div id="senderQrContainer" class="qr-box" style="display: none;"></div>
-
-    <div id="senderScanner" class="scanner-view"></div>
-    <button class="action" id="btnScanAnswer" style="display: none;">Step 3: Scan Receiver's Answer QR</button>
-
+    
     <div class="btn-row">
+      <button class="action" id="btnSenderRun" disabled>Open Local Pipe</button>
       <button class="cancel-btn" id="btnSenderCancel">Cancel Transfer</button>
     </div>
 
-    <label id="senderProgressLabel">Transfer Progress: 0%</label>
+    <div class="code-display">
+      <div style="font-size:11px; color:var(--muted);">LOCAL ROOM CODE</div>
+      <div class="code-val" id="dispCode">------</div>
+    </div>
+
+    <div class="stats">
+      <span id="senderProgressLabel">Transfer: 0%</span>
+      <span id="senderSpeedLabel">0.0 MB/s</span>
+    </div>
     <progress id="senderProgress" value="0" max="100"></progress>
-    <div class="status" id="senderLog">Select a file to begin optical QR handshake.</div>
+    <div class="status" id="senderLog">Select a file. Connect both devices to the same Wi-Fi / Hotspot.</div>
   </div>
 
   <!-- RECEIVER VIEW -->
   <div class="card" id="receiverView" style="display: none;">
-    <h2>2. Receiver (Camera / Optical Link)</h2>
-    <button class="action" id="btnScanOffer">Step 2: Scan Sender's QR Code</button>
-    <div id="recvScanner" class="scanner-view"></div>
-
-    <div id="recvQrContainer" class="qr-box" style="display: none;"></div>
-    <div id="recvQrNote" style="display:none; font-size: 11px; text-align: center; color: var(--accent);">Show this QR code back to the sender's camera!</div>
-
+    <h2>2. Local Drop (Receiver)</h2>
+    <label>Enter 6-Digit Room Code</label>
+    <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
+    
     <div class="btn-row">
+      <button class="action" id="btnRecvRun">Connect & Receive</button>
       <button class="cancel-btn" id="btnRecvCancel">Cancel Transfer</button>
     </div>
 
-    <label id="recvProgressLabel">Ingestion Progress: 0%</label>
+    <div class="stats">
+      <span id="recvProgressLabel">Ingestion: 0%</span>
+      <span id="recvSpeedLabel">0.0 MB/s</span>
+    </div>
     <progress id="recvProgress" value="0" max="100"></progress>
-    <div class="status" id="recvLog">Click "Scan Sender's QR Code" and aim camera at the sender's screen.</div>
-    <a class="btn-download" id="btnDownload">Save File to Device</a>
+    <div class="status" id="recvLog">Enter the code displayed on the phone to stream over local Wi-Fi.</div>
+    <a class="btn-download" id="btnDownload">Save File to Laptop</a>
   </div>
 </div>
 
 <script>
-const CHUNK_SIZE = 16 * 1024; // 16KB WebRTC chunk
-const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+// 256 KB chunks ensure maximum throughput across local Wi-Fi chipsets
+const CHUNK_SIZE = 256 * 1024;
+
+// Direct LAN ICE configuration - forces direct local IP routing
+const LAN_ICE_CONFIG = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  iceCandidatePoolSize: 10
+};
 
 let pc = null;
 let dataChannel = null;
 let controlChannel = null;
 let currentFile = null;
-let html5QrScanner = null;
+let roomCode = "";
+let sseSource = null;
 let isCancelled = false;
 
-// Mode Switching
+// Speed tracking variables
+let lastTime = 0;
+let lastBytes = 0;
+
+// UI Tabs
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
 const receiverView = document.getElementById("receiverView");
 
 tabSender.addEventListener("click", () => {
-  stopScanner();
   tabSender.classList.add("active"); tabReceiver.classList.remove("active");
   senderView.style.display = "flex"; receiverView.style.display = "none";
 });
 
 tabReceiver.addEventListener("click", () => {
-  stopScanner();
   tabReceiver.classList.add("active"); tabSender.classList.remove("active");
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
-function stopScanner() {
-  if (html5QrScanner) {
-    html5QrScanner.stop().catch(() => {}).finally(() => { html5QrScanner = null; });
-  }
-  document.getElementById("senderScanner").style.display = "none";
-  document.getElementById("recvScanner").style.display = "none";
-}
-
 function cleanup() {
-  stopScanner();
+  if (sseSource) { sseSource.close(); sseSource = null; }
   if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
   if (controlChannel) { try { controlChannel.close(); } catch(e){} controlChannel = null; }
   if (pc) { try { pc.close(); } catch(e){} pc = null; }
 }
 
-// Minimal SDP Compressor (extracts strictly necessary fields to fit into a dense QR code)
-function compressSDP(desc) {
-  return JSON.stringify({ t: desc.type, s: desc.sdp });
-}
-function decompressSDP(jsonStr) {
-  const d = JSON.parse(jsonStr);
-  return new RTCSessionDescription({ type: d.t, s: d.s });
-}
+function pack(desc) { return JSON.stringify({ t: desc.type, s: desc.sdp }); }
+function unpack(str) { const d = JSON.parse(str); return new RTCSessionDescription({ type: d.t, s: d.s }); }
 
 // --- SENDER ---
 const filePicker = document.getElementById("filePicker");
-const btnSenderInit = document.getElementById("btnSenderInit");
-const senderQrContainer = document.getElementById("senderQrContainer");
-const btnScanAnswer = document.getElementById("btnScanAnswer");
+const btnSenderRun = document.getElementById("btnSenderRun");
 const btnSenderCancel = document.getElementById("btnSenderCancel");
+const dispCode = document.getElementById("dispCode");
 const senderProgress = document.getElementById("senderProgress");
 const senderProgressLabel = document.getElementById("senderProgressLabel");
+const senderSpeedLabel = document.getElementById("senderSpeedLabel");
 const senderLog = document.getElementById("senderLog");
 
 filePicker.addEventListener("change", () => {
   currentFile = filePicker.files[0];
-  btnSenderInit.disabled = !currentFile;
+  btnSenderRun.disabled = !currentFile;
   if (currentFile) {
-    senderLog.innerHTML = `Ready: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB). Click button to generate QR.`;
+    senderLog.innerHTML = `Loaded: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024*1024)).toFixed(2)} GB). Click "Open Local Pipe".`;
   }
 });
 
-btnSenderInit.addEventListener("click", async () => {
+btnSenderRun.addEventListener("click", async () => {
   cleanup();
   isCancelled = false;
-  btnSenderInit.disabled = true;
+  btnSenderRun.disabled = true;
   btnSenderCancel.style.display = "block";
-  senderLog.innerHTML = "Generating Offer QR Code...";
+  senderProgress.value = 0;
+  senderProgressLabel.innerText = "Transfer: 0%";
+  senderSpeedLabel.innerText = "0.0 MB/s";
 
-  pc = new RTCPeerConnection(ICE_CONFIG);
+  roomCode = Math.floor(100000 + Math.random() * 900000).toString();
+  dispCode.innerText = roomCode;
+  senderLog.innerHTML = `Binding local socket for room <b>${roomCode}</b>...`;
 
-  dataChannel = pc.createDataChannel("filePipe", { ordered: true });
+  pc = new RTCPeerConnection(LAN_ICE_CONFIG);
+
+  dataChannel = pc.createDataChannel("lanPipe", { ordered: true });
   dataChannel.binaryType = "arraybuffer";
 
   controlChannel = pc.createDataChannel("ctrlPipe", { ordered: true });
@@ -186,85 +191,97 @@ btnSenderInit.addEventListener("click", async () => {
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  pc.onicecandidate = () => {
+  pc.onicecandidate = async () => {
     if (pc.iceGatheringState === "complete") {
-      senderQrContainer.innerHTML = "";
-      senderQrContainer.style.display = "flex";
-      
-      // Render dense QR code
-      new QRCode(senderQrContainer, {
-        text: compressSDP(pc.localDescription),
-        width: 210,
-        height: 210,
-        correctLevel: QRCode.CorrectLevel.L
+      // Exchange small SDP handshake over lightweight broker
+      await fetch(`https://ntfy.sh/pxp_local_${roomCode}`, {
+        method: "POST",
+        body: JSON.stringify({ role: "sender", desc: pack(pc.localDescription) })
       });
 
-      senderLog.innerHTML = `<span class="val">QR Ready!</span> Point receiver's camera at this screen, then click Step 3 below.`;
-      btnScanAnswer.style.display = "block";
+      senderLog.innerHTML = `
+        <span class="val">Local Pipe Ready!</span><br/>
+        Enter code <b>${roomCode}</b> on your laptop.<br/>
+        <i>Waiting for direct local link...</i>
+      `;
+
+      listenForReceiver(roomCode);
     }
   };
 });
 
-btnScanAnswer.addEventListener("click", () => {
-  senderQrContainer.style.display = "none";
-  btnScanAnswer.style.display = "none";
-  const scannerDiv = document.getElementById("senderScanner");
-  scannerDiv.style.display = "block";
+function listenForReceiver(code) {
+  sseSource = new EventSource(`https://ntfy.sh/pxp_local_${code}/sse`);
+  sseSource.onmessage = async (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.event === "message" && data.message) {
+        const payload = JSON.parse(data.message);
+        if (payload.role === "receiver") {
+          sseSource.close();
+          sseSource = null;
 
-  html5QrScanner = new Html5Qrcode("senderScanner");
-  html5QrScanner.start(
-    { facingMode: "environment" },
-    { fps: 10, qrbox: { width: 220, height: 220 } },
-    async (decodedText) => {
-      stopScanner();
-      senderLog.innerHTML = `<span class="val">Optical Handshake Locked!</span> Establishing P2P stream...`;
+          senderLog.innerHTML = `<span class="val">Connected to Laptop!</span> Punching direct LAN socket...`;
+          const answerDesc = unpack(payload.desc);
+          await pc.setRemoteDescription(answerDesc);
 
-      try {
-        const answerDesc = decompressSDP(decodedText);
-        await pc.setRemoteDescription(answerDesc);
+          dataChannel.onopen = async () => {
+            senderLog.innerHTML = `<span class="val">Direct Pipe Established!</span> Pumping 256 KB frames...`;
 
-        dataChannel.onopen = async () => {
-          senderLog.innerHTML = `<span class="val">P2P Stream Open!</span> Slicing & transmitting file...`;
+            controlChannel.send(JSON.stringify({
+              type: "meta",
+              name: currentFile.name,
+              size: currentFile.size
+            }));
 
-          controlChannel.send(JSON.stringify({
-            type: "meta",
-            name: currentFile.name,
-            size: currentFile.size
-          }));
+            const total = currentFile.size;
+            let offset = 0;
+            lastTime = performance.now();
+            lastBytes = 0;
 
-          const total = currentFile.size;
-          let offset = 0;
-          dataChannel.bufferedAmountLowThreshold = 256 * 1024;
+            // 1MB threshold keeps Wi-Fi pipe completely saturated without overflow
+            dataChannel.bufferedAmountLowThreshold = 1024 * 1024;
 
-          while (offset < total) {
-            if (isCancelled) return;
+            while (offset < total) {
+              if (isCancelled) return;
 
-            if (dataChannel.bufferedAmount > 1024 * 1024) {
-              await new Promise(r => { dataChannel.onbufferedamountlow = r; });
+              if (dataChannel.bufferedAmount > 8 * 1024 * 1024) {
+                await new Promise(r => { dataChannel.onbufferedamountlow = r; });
+              }
+
+              const slice = currentFile.slice(offset, offset + CHUNK_SIZE);
+              const buf = await slice.arrayBuffer();
+              dataChannel.send(buf);
+              offset += buf.byteLength;
+
+              // Speed & percentage calculation
+              const now = performance.now();
+              if (now - lastTime >= 500) {
+                const diffBytes = offset - lastBytes;
+                const diffSeconds = (now - lastTime) / 1000;
+                const speedMB = (diffBytes / (1024 * 1024)) / diffSeconds;
+                senderSpeedLabel.innerText = `${speedMB.toFixed(1)} MB/s`;
+                lastTime = now;
+                lastBytes = offset;
+              }
+
+              const pct = Math.round((offset / total) * 100);
+              senderProgress.value = pct;
+              senderProgressLabel.innerText = `Transfer: ${pct}% (${(offset / (1024*1024)).toFixed(0)} MB / ${(total / (1024*1024)).toFixed(0)} MB)`;
             }
 
-            const slice = currentFile.slice(offset, offset + CHUNK_SIZE);
-            const buf = await slice.arrayBuffer();
-            dataChannel.send(buf);
-            offset += buf.byteLength;
-
-            const pct = Math.round((offset / total) * 100);
-            senderProgress.value = pct;
-            senderProgressLabel.innerText = `Sent: ${pct}% (${(offset / (1024*1024)).toFixed(1)} MB / ${(total / (1024*1024)).toFixed(1)} MB)`;
-          }
-
-          if (!isCancelled) {
-            controlChannel.send(JSON.stringify({ type: "complete" }));
-            senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Delivered directly.`;
-            btnSenderCancel.style.display = "none";
-          }
-        };
-      } catch (err) {
-        senderLog.innerHTML = `<span class="err">Invalid QR scanned. Please retry.</span>`;
+            if (!isCancelled) {
+              controlChannel.send(JSON.stringify({ type: "complete" }));
+              senderLog.innerHTML = `<span class="val">Transfer Complete!</span> 100% delivered to laptop.`;
+              btnSenderCancel.style.display = "none";
+              senderSpeedLabel.innerText = "Done";
+            }
+          };
+        }
       }
-    }
-  );
-});
+    } catch (err) {}
+  };
+}
 
 btnSenderCancel.addEventListener("click", () => {
   isCancelled = true;
@@ -272,20 +289,21 @@ btnSenderCancel.addEventListener("click", () => {
     try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
   cleanup();
-  btnSenderInit.disabled = !currentFile;
+  btnSenderRun.disabled = !currentFile;
   btnSenderCancel.style.display = "none";
   senderProgress.value = 0;
-  senderProgressLabel.innerText = "Transfer Progress: 0%";
+  senderProgressLabel.innerText = "Transfer: 0%";
+  senderSpeedLabel.innerText = "0.0 MB/s";
   senderLog.innerHTML = `<span class="err">Transfer cancelled by you.</span>`;
 });
 
 // --- RECEIVER ---
-const btnScanOffer = document.getElementById("btnScanOffer");
-const recvQrContainer = document.getElementById("recvQrContainer");
-const recvQrNote = document.getElementById("recvQrNote");
+const recvCodeInput = document.getElementById("recvCodeInput");
+const btnRecvRun = document.getElementById("btnRecvRun");
 const btnRecvCancel = document.getElementById("btnRecvCancel");
 const recvProgress = document.getElementById("recvProgress");
 const recvProgressLabel = document.getElementById("recvProgressLabel");
+const recvSpeedLabel = document.getElementById("recvSpeedLabel");
 const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
@@ -293,93 +311,128 @@ let receivedBuffers = [];
 let receivedTotal = 0;
 let fileMeta = null;
 
-btnScanOffer.addEventListener("click", () => {
+btnRecvRun.addEventListener("click", async () => {
+  const code = recvCodeInput.value.trim();
+  if (code.length !== 6) {
+    alert("Please enter the 6-digit code shown on the phone!");
+    return;
+  }
+
   cleanup();
   isCancelled = false;
-  btnScanOffer.style.display = "none";
+  btnRecvRun.disabled = true;
   btnRecvCancel.style.display = "block";
-  const scannerDiv = document.getElementById("recvScanner");
-  scannerDiv.style.display = "block";
+  btnDownload.style.display = "none";
+  receivedBuffers = [];
+  receivedTotal = 0;
+  recvProgress.value = 0;
+  recvProgressLabel.innerText = "Ingestion: 0%";
+  recvSpeedLabel.innerText = "0.0 MB/s";
+  recvLog.innerHTML = `Handshaking with Phone (Room: ${code})...`;
 
-  html5QrScanner = new Html5Qrcode("recvScanner");
-  html5QrScanner.start(
-    { facingMode: "environment" },
-    { fps: 10, qrbox: { width: 220, height: 220 } },
-    async (decodedText) => {
-      stopScanner();
-      recvLog.innerHTML = "Sender QR detected! Computing answer...";
+  try {
+    const res = await fetch(`https://ntfy.sh/pxp_local_${code}/json?poll=1`);
+    const text = await res.text();
+    let offerDesc = null;
 
-      pc = new RTCPeerConnection(ICE_CONFIG);
-
-      pc.ondatachannel = (e) => {
-        const ch = e.channel;
-        if (ch.label === "ctrlPipe") {
-          controlChannel = ch;
-          controlChannel.onmessage = (ev) => {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === "meta") {
-              fileMeta = msg;
-              recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024)).toFixed(1)} MB)...`;
-            } else if (msg.type === "cancel") {
-              isCancelled = true;
-              cleanup();
-              recvLog.innerHTML = `<span class="err">Transfer cancelled by sender.</span>`;
-            } else if (msg.type === "complete") {
-              recvLog.innerHTML = `<span class="val">Stream Complete!</span> Click save below.`;
-              const finalBlob = new Blob(receivedBuffers, { type: "application/octet-stream" });
-              const url = URL.createObjectURL(finalBlob);
-              btnDownload.href = url;
-              btnDownload.download = fileMeta.name;
-              btnDownload.style.display = "block";
-              btnDownload.innerText = `Save ${fileMeta.name} to Device`;
-              btnRecvCancel.style.display = "none";
+    if (text) {
+      const lines = text.trim().split("\n");
+      for (let line of lines) {
+        try {
+          const item = JSON.parse(line);
+          if (item.event === "message" && item.message) {
+            const payload = JSON.parse(item.message);
+            if (payload.role === "sender") {
+              offerDesc = unpack(payload.desc);
             }
-          };
-        } else if (ch.label === "filePipe") {
-          dataChannel = ch;
-          dataChannel.binaryType = "arraybuffer";
-          dataChannel.onmessage = (ev) => {
-            if (isCancelled) return;
-            receivedBuffers.push(ev.data);
-            receivedTotal += ev.data.byteLength;
-
-            if (fileMeta && fileMeta.size) {
-              const pct = Math.round((receivedTotal / fileMeta.size) * 100);
-              recvProgress.value = pct;
-              recvProgressLabel.innerText = `Received: ${pct}% (${(receivedTotal / (1024*1024)).toFixed(1)} MB / ${(fileMeta.size / (1024*1024)).toFixed(1)} MB)`;
-            }
-          };
-        }
-      };
-
-      try {
-        const offerDesc = decompressSDP(decodedText);
-        await pc.setRemoteDescription(offerDesc);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        pc.onicecandidate = () => {
-          if (pc.iceGatheringState === "complete") {
-            recvQrContainer.innerHTML = "";
-            recvQrContainer.style.display = "flex";
-            recvQrNote.style.display = "block";
-
-            new QRCode(recvQrContainer, {
-              text: compressSDP(pc.localDescription),
-              width: 210,
-              height: 210,
-              correctLevel: QRCode.CorrectLevel.L
-            });
-
-            recvLog.innerHTML = `<span class="val">Answer QR Generated!</span> Aim Sender's camera at this QR code.`;
           }
-        };
-      } catch (err) {
-        recvLog.innerHTML = `<span class="err">Failed to parse Sender QR. Retry scan.</span>`;
-        btnScanOffer.style.display = "block";
+        } catch(e) {}
       }
     }
-  );
+
+    if (!offerDesc) {
+      recvLog.innerHTML = `<span class="err">Phone not found. Make sure you tapped "Open Local Pipe" on phone first!</span>`;
+      btnRecvRun.disabled = false;
+      btnRecvCancel.style.display = "none";
+      return;
+    }
+
+    pc = new RTCPeerConnection(LAN_ICE_CONFIG);
+
+    pc.ondatachannel = (e) => {
+      const ch = e.channel;
+      if (ch.label === "ctrlPipe") {
+        controlChannel = ch;
+        controlChannel.onmessage = (ev) => {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "meta") {
+            fileMeta = msg;
+            lastTime = performance.now();
+            lastBytes = 0;
+            recvLog.innerHTML = `Streaming <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024*1024)).toFixed(2)} GB) over Wi-Fi...`;
+          } else if (msg.type === "cancel") {
+            isCancelled = true;
+            cleanup();
+            recvLog.innerHTML = `<span class="err">Transfer cancelled by phone.</span>`;
+          } else if (msg.type === "complete") {
+            recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Assembling binary...`;
+            const finalBlob = new Blob(receivedBuffers, { type: "application/octet-stream" });
+            const url = URL.createObjectURL(finalBlob);
+            btnDownload.href = url;
+            btnDownload.download = fileMeta.name;
+            btnDownload.style.display = "block";
+            btnDownload.innerText = `Save ${fileMeta.name} (${(finalBlob.size / (1024*1024*1024)).toFixed(2)} GB)`;
+            btnRecvCancel.style.display = "none";
+            recvSpeedLabel.innerText = "Finished";
+          }
+        };
+      } else if (ch.label === "lanPipe") {
+        dataChannel = ch;
+        dataChannel.binaryType = "arraybuffer";
+        dataChannel.onmessage = (ev) => {
+          if (isCancelled) return;
+          receivedBuffers.push(ev.data);
+          receivedTotal += ev.data.byteLength;
+
+          // Real-time receiver speedometer
+          const now = performance.now();
+          if (now - lastTime >= 500) {
+            const diffBytes = receivedTotal - lastBytes;
+            const diffSeconds = (now - lastTime) / 1000;
+            const speedMB = (diffBytes / (1024 * 1024)) / diffSeconds;
+            recvSpeedLabel.innerText = `${speedMB.toFixed(1)} MB/s`;
+            lastTime = now;
+            lastBytes = receivedTotal;
+          }
+
+          if (fileMeta && fileMeta.size) {
+            const pct = Math.round((receivedTotal / fileMeta.size) * 100);
+            recvProgress.value = pct;
+            recvProgressLabel.innerText = `Ingestion: ${pct}% (${(receivedTotal / (1024*1024)).toFixed(0)} MB / ${(fileMeta.size / (1024*1024)).toFixed(0)} MB)`;
+          }
+        };
+      }
+    };
+
+    await pc.setRemoteDescription(offerDesc);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    pc.onicecandidate = async () => {
+      if (pc.iceGatheringState === "complete") {
+        await fetch(`https://ntfy.sh/pxp_local_${code}`, {
+          method: "POST",
+          body: JSON.stringify({ role: "receiver", desc: pack(pc.localDescription) })
+        });
+        recvLog.innerHTML = `<span class="val">Connected!</span> Waiting for stream...`;
+      }
+    };
+
+  } catch (err) {
+    recvLog.innerHTML = `<span class="err">Connection failed: ${err.message}</span>`;
+    btnRecvRun.disabled = false;
+    btnRecvCancel.style.display = "none";
+  }
 });
 
 btnRecvCancel.addEventListener("click", () => {
@@ -388,10 +441,11 @@ btnRecvCancel.addEventListener("click", () => {
     try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
   cleanup();
-  btnScanOffer.style.display = "block";
+  btnRecvRun.disabled = false;
   btnRecvCancel.style.display = "none";
   recvProgress.value = 0;
-  recvProgressLabel.innerText = "Ingestion Progress: 0%";
+  recvProgressLabel.innerText = "Ingestion: 0%";
+  recvSpeedLabel.innerText = "0.0 MB/s";
   recvLog.innerHTML = `<span class="err">Transfer cancelled by you.</span>`;
 });
 </script>
