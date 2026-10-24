@@ -3,8 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - Ultra-Reliable P2P Streamer</title>
-  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <title>PixelPipe - Native WebRTC Cross-City Transfer</title>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
@@ -48,7 +47,7 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender Mode (Reliable Stream)</h2>
+    <h2>1. Sender Mode (Native WebRTC)</h2>
     <label>Select File</label>
     <input type="file" id="filePicker" />
     
@@ -88,24 +87,29 @@
 </div>
 
 <script>
-const PREFIX = "pixelpipe-rel-";
-const CHUNK_SIZE = 128 * 1024; // 128KB chunks: optimal throughput without overflowing buffers
+// --- CONFIG & PROTOCOL CONSTANTS ---
+const CHUNK_SIZE = 64 * 1024; // 64 KB native WebRTC chunks
+const SIGNAL_RELAYS = [
+  "wss://relay.damus.io",
+  "wss://nos.lol",
+  "wss://relay.snort.social"
+];
 
-const RTC_CONFIG = {
-  config: {
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun2.l.google.com:19302" }
-    ]
-  }
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" }
+  ]
 };
 
-let peer = null;
-let activeConn = null;
+let pc = null;
+let dataChannel = null;
+let controlChannel = null;
+let activeWs = null;
 let isCancelled = false;
 
-// UI Tabs
+// --- DOM ELEMENTS ---
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
@@ -121,20 +125,76 @@ tabReceiver.addEventListener("click", () => {
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
-// Crypto
-async function deriveKey(codeStr, salt) {
-  const enc = new TextEncoder();
-  const keyMat = await crypto.subtle.importKey("raw", enc.encode(codeStr), "PBKDF2", false, ["deriveKey"]);
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 20000, hash: "SHA-256" },
-    keyMat,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
+// --- LIGHTWEIGHT NOSTR-COMPATIBLE SIGNALING ENGINE ---
+class EphemeralSignaling {
+  constructor(roomCode, onMessage) {
+    this.roomCode = roomCode;
+    this.onMessage = onMessage;
+    this.ws = null;
+    this.connected = false;
+  }
+
+  connect() {
+    return new Promise((resolve, reject) => {
+      let relayIndex = 0;
+      const tryNextRelay = () => {
+        if (relayIndex >= SIGNAL_RELAYS.length) {
+          reject(new Error("Signaling relays unreachable"));
+          return;
+        }
+        const url = SIGNAL_RELAYS[relayIndex++];
+        this.ws = new WebSocket(url);
+
+        this.ws.onopen = () => {
+          this.connected = true;
+          activeWs = this.ws;
+          // Subscribe to messages tagged with our 6-digit code
+          this.ws.send(JSON.stringify(["REQ", "sub-" + this.roomCode, { "#t": ["pxp-" + this.roomCode], "kinds": [20000], "limit": 10 }]));
+          resolve();
+        };
+
+        this.ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data[0] === "EVENT" && data[2]?.content) {
+              const parsed = JSON.parse(data[2].content);
+              this.onMessage(parsed);
+            }
+          } catch (e) {}
+        };
+
+        this.ws.onerror = () => {
+          this.ws.close();
+          tryNextRelay();
+        };
+      };
+      tryNextRelay();
+    });
+  }
+
+  send(payload) {
+    if (this.ws && this.connected && this.ws.readyState === WebSocket.OPEN) {
+      const event = {
+        kind: 20000,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["t", "pxp-" + this.roomCode]],
+        content: JSON.stringify(payload),
+        pubkey: "0000000000000000000000000000000000000000000000000000000000000000",
+        id: Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => b.toString(16).padStart(2, "0")).join("")
+      };
+      this.ws.send(JSON.stringify(["EVENT", event]));
+    }
+  }
+
+  close() {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
 }
 
-// --- SENDER ---
+// --- SENDER IMPLEMENTATION ---
 const filePicker = document.getElementById("filePicker");
 const btnSenderRun = document.getElementById("btnSenderRun");
 const btnSenderCancel = document.getElementById("btnSenderCancel");
@@ -144,6 +204,7 @@ const senderProgressLabel = document.getElementById("senderProgressLabel");
 const senderLog = document.getElementById("senderLog");
 
 let currentFile = null;
+let senderSig = null;
 
 filePicker.addEventListener("change", () => {
   currentFile = filePicker.files[0];
@@ -154,16 +215,26 @@ filePicker.addEventListener("change", () => {
 });
 
 btnSenderCancel.addEventListener("click", () => {
+  triggerCancel("Transfer cancelled by you.");
+});
+
+function triggerCancel(msg) {
   isCancelled = true;
-  if (activeConn && activeConn.open) {
-    activeConn.send({ type: "cancel" });
+  if (controlChannel && controlChannel.readyState === "open") {
+    try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
   setTimeout(() => {
-    if (activeConn) { activeConn.close(); activeConn = null; }
-    if (peer) { peer.destroy(); peer = null; }
-    resetSenderUI("Transfer cancelled by you.");
-  }, 100);
-});
+    cleanupConnections();
+    resetSenderUI(msg);
+  }, 50);
+}
+
+function cleanupConnections() {
+  if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
+  if (controlChannel) { try { controlChannel.close(); } catch(e){} controlChannel = null; }
+  if (pc) { try { pc.close(); } catch(e){} pc = null; }
+  if (senderSig) { senderSig.close(); senderSig = null; }
+}
 
 function resetSenderUI(msg) {
   btnSenderRun.disabled = !currentFile;
@@ -181,110 +252,102 @@ btnSenderRun.addEventListener("click", async () => {
 
   const file = currentFile;
   const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const key = await deriveKey(code, salt);
+  dispCode.innerText = code;
+  senderLog.innerHTML = `Connecting to global signaling relay...`;
 
-  if (peer) peer.destroy();
-  peer = new Peer(PREFIX + code, RTC_CONFIG);
+  pc = new RTCPeerConnection(ICE_SERVERS);
 
-  peer.on("open", () => {
-    dispCode.innerText = code;
-    senderLog.innerHTML = `
-      <span class="val">Room Created!</span><br/>
-      Give this code to receiver: <b>${code}</b><br/>
-      <i>Waiting for receiver to connect...</i>
-    `;
+  // Dedicated reliable binary channel
+  dataChannel = pc.createDataChannel("fileTransfer", { ordered: true });
+  dataChannel.binaryType = "arraybuffer";
+
+  // Dedicated out-of-band text control channel for progress & instant cancel
+  controlChannel = pc.createDataChannel("control", { ordered: true });
+
+  controlChannel.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "cancel") {
+      isCancelled = true;
+      cleanupConnections();
+      resetSenderUI("Transfer cancelled by receiver.");
+    }
+  };
+
+  senderSig = new EphemeralSignaling(code, async (msg) => {
+    if (msg.role === "receiver") {
+      if (msg.sdp) {
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      } else if (msg.candidate) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
+      }
+    }
   });
 
-  peer.on("connection", (conn) => {
-    activeConn = conn;
-    senderLog.innerHTML = `<span class="val">Receiver Connected!</span> Starting transfer...`;
+  await senderSig.connect();
 
-    conn.on("open", async () => {
-      const fileSize = file.size;
-      const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      senderSig.send({ role: "sender", candidate: event.candidate });
+    }
+  };
 
-      // Send initial metadata
-      conn.send({
-        type: "meta",
-        name: file.name,
-        size: fileSize,
-        salt: Array.from(salt),
-        totalChunks: totalChunks
-      });
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  senderSig.send({ role: "sender", sdp: offer });
 
-      // Flow Control: Promise-based acknowledgment handler
-      let waitingForAck = null;
+  senderLog.innerHTML = `
+    <span class="val">Room Created!</span><br/>
+    Give this code to receiver: <b>${code}</b><br/>
+    <i>Waiting for receiver to connect...</i>
+  `;
 
-      conn.on("data", (msg) => {
-        if (msg.type === "ack" && waitingForAck) {
-          waitingForAck();
-          waitingForAck = null;
-        } else if (msg.type === "cancel") {
-          isCancelled = true;
-          resetSenderUI("Transfer cancelled by receiver.");
-          if (activeConn) { activeConn.close(); activeConn = null; }
-          if (peer) { peer.destroy(); peer = null; }
+  dataChannel.onopen = async () => {
+    senderLog.innerHTML = `<span class="val">Receiver Connected!</span> Starting native binary stream...`;
+    
+    // Send file metadata over control channel
+    controlChannel.send(JSON.stringify({
+      type: "meta",
+      name: file.name,
+      size: file.size
+    }));
+
+    const totalBytes = file.size;
+    let offset = 0;
+
+    dataChannel.bufferedAmountLowThreshold = 512 * 1024; // 512 KB threshold
+
+    // Continuous streaming pump bound to native network backpressure
+    const pumpData = async () => {
+      while (offset < totalBytes) {
+        if (isCancelled) return;
+
+        // If OS network buffer is saturated, wait for bufferedamountlow event
+        if (dataChannel.bufferedAmount > 2 * 1024 * 1024) {
+          await new Promise(r => { dataChannel.onbufferedamountlow = r; });
         }
-      });
 
-      // Stream Chunks with Reliable Flow Control
-      for (let i = 0; i < totalChunks; i++) {
-        if (isCancelled) return;
+        const slice = file.slice(offset, offset + CHUNK_SIZE);
+        const buf = await slice.arrayBuffer();
+        dataChannel.send(buf);
+        offset += buf.byteLength;
 
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, fileSize);
-        const sliceBlob = file.slice(start, end);
-        const rawBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
-
-        if (isCancelled) return;
-
-        // Encrypt Chunk
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, rawBuffer));
-
-        if (isCancelled) return;
-
-        // Send Chunk Payload
-        conn.send({
-          type: "chunk",
-          chunkIdx: i,
-          iv: Array.from(iv),
-          payload: encrypted
-        });
-
-        // Wait for receiver ACK before sending next chunk (guarantees 0% stall never happens)
-        await new Promise(resolve => {
-          waitingForAck = resolve;
-          // Fallback timeout in case packet dropped
-          setTimeout(resolve, 300);
-        });
-
-        const pct = Math.round(((i + 1) / totalChunks) * 100);
+        const pct = Math.round((offset / totalBytes) * 100);
         senderProgress.value = pct;
-        senderProgressLabel.innerText = `Sent: ${pct}% (${i + 1}/${totalChunks} chunks)`;
+        senderProgressLabel.innerText = `Sent: ${pct}% (${(offset / (1024*1024)).toFixed(1)} MB / ${(totalBytes / (1024*1024)).toFixed(1)} MB)`;
       }
 
       if (!isCancelled) {
-        conn.send({ type: "complete" });
+        controlChannel.send(JSON.stringify({ type: "complete" }));
         senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Successfully delivered.`;
         btnSenderCancel.style.display = "none";
       }
-    });
+    };
 
-    conn.on("close", () => {
-      if (!isCancelled) resetSenderUI("Receiver closed the connection.");
-    });
-  });
-
-  peer.on("error", (err) => {
-    senderLog.innerHTML = `<span class="err">Connection Error: ${err.type}</span>. Retrying...`;
-    btnSenderRun.disabled = false;
-    btnSenderCancel.style.display = "none";
-  });
+    pumpData();
+  };
 });
 
-// --- RECEIVER ---
+// --- RECEIVER IMPLEMENTATION ---
 const recvCodeInput = document.getElementById("recvCodeInput");
 const btnRecvRun = document.getElementById("btnRecvRun");
 const btnRecvCancel = document.getElementById("btnRecvCancel");
@@ -293,20 +356,20 @@ const recvProgressLabel = document.getElementById("recvProgressLabel");
 const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
-let meta = null;
-let receivedBlobs = [];
-let derivedRecvKey = null;
+let receiverSig = null;
+let receivedBuffers = [];
+let receivedBytesTotal = 0;
+let fileMeta = null;
 
 btnRecvCancel.addEventListener("click", () => {
   isCancelled = true;
-  if (activeConn && activeConn.open) {
-    activeConn.send({ type: "cancel" });
+  if (controlChannel && controlChannel.readyState === "open") {
+    try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
   setTimeout(() => {
-    if (activeConn) { activeConn.close(); activeConn = null; }
-    if (peer) { peer.destroy(); peer = null; }
+    cleanupConnections();
     resetReceiverUI("Transfer cancelled by you.");
-  }, 100);
+  }, 50);
 });
 
 function resetReceiverUI(msg) {
@@ -316,14 +379,15 @@ function resetReceiverUI(msg) {
   recvProgress.value = 0;
   recvProgressLabel.innerText = "Transfer Progress: 0%";
   recvLog.innerHTML = `<span class="err">${msg}</span>`;
-  receivedBlobs = [];
-  activeConn = null;
+  receivedBuffers = [];
+  receivedBytesTotal = 0;
+  fileMeta = null;
 }
 
-btnRecvRun.addEventListener("click", () => {
+btnRecvRun.addEventListener("click", async () => {
   const code = recvCodeInput.value.trim();
   if (code.length !== 6) {
-    alert("Please enter the complete 6-digit verification code!");
+    alert("Please enter the complete 6-digit code!");
     return;
   }
 
@@ -331,80 +395,82 @@ btnRecvRun.addEventListener("click", () => {
   btnRecvCancel.style.display = "block";
   btnDownload.style.display = "none";
   isCancelled = false;
-  receivedBlobs = [];
+  receivedBuffers = [];
+  receivedBytesTotal = 0;
   recvProgress.value = 0;
   recvProgressLabel.innerText = "Transfer Progress: 0%";
+  recvLog.innerHTML = `Connecting to Sender (Room: ${code})...`;
 
-  recvLog.innerHTML = `Locating Sender (Room: ${code})...`;
+  pc = new RTCPeerConnection(ICE_SERVERS);
 
-  if (peer) peer.destroy();
-  peer = new Peer(RTC_CONFIG);
-
-  peer.on("open", () => {
-    const conn = peer.connect(PREFIX + code, { reliable: true });
-    activeConn = conn;
-
-    conn.on("open", () => {
-      recvLog.innerHTML = `<span class="val">Connected!</span> Waiting for incoming stream...`;
-    });
-
-    conn.on("data", async (msg) => {
-      if (isCancelled) return;
-
-      if (msg.type === "cancel") {
-        isCancelled = true;
-        resetReceiverUI("Transfer cancelled by sender.");
-        if (activeConn) { activeConn.close(); activeConn = null; }
-        if (peer) { peer.destroy(); peer = null; }
-        return;
+  receiverSig = new EphemeralSignaling(code, async (msg) => {
+    if (msg.role === "sender") {
+      if (msg.sdp) {
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        receiverSig.send({ role: "receiver", sdp: answer });
+      } else if (msg.candidate) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
       }
-
-      if (msg.type === "meta") {
-        meta = msg;
-        derivedRecvKey = await deriveKey(code, new Uint8Array(meta.salt));
-        recvLog.innerHTML = `Receiving <b>${meta.name}</b> (${(meta.size / (1024*1024)).toFixed(1)} MB)...`;
-      } 
-      else if (msg.type === "chunk") {
-        // Send immediate acknowledgment back to sender to unlock next chunk
-        conn.send({ type: "ack" });
-
-        // Decrypt chunk
-        const iv = new Uint8Array(msg.iv);
-        const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv }, derivedRecvKey, msg.payload);
-        receivedBlobs.push(new Blob([decrypted]));
-
-        const pct = Math.round((receivedBlobs.length / meta.totalChunks) * 100);
-        recvProgress.value = pct;
-        recvProgressLabel.innerText = `Received: ${pct}% (${receivedBlobs.length}/${meta.totalChunks} chunks)`;
-      } 
-      else if (msg.type === "complete") {
-        recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Ready to save.`;
-        btnDownload.style.display = "block";
-        btnDownload.innerText = `Save ${meta.name}`;
-        btnRecvRun.disabled = false;
-        btnRecvCancel.style.display = "none";
-      }
-    });
-
-    conn.on("close", () => {
-      if (!isCancelled) resetReceiverUI("Sender disconnected.");
-    });
+    }
   });
 
-  peer.on("error", (err) => {
-    recvLog.innerHTML = `<span class="err">Could not connect to room. Verify the code.</span>`;
-    btnRecvRun.disabled = false;
-    btnRecvCancel.style.display = "none";
-  });
+  await receiverSig.connect();
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      receiverSig.send({ role: "receiver", candidate: event.candidate });
+    }
+  };
+
+  pc.ondatachannel = (event) => {
+    const ch = event.channel;
+    if (ch.label === "control") {
+      controlChannel = ch;
+      controlChannel.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "meta") {
+          fileMeta = msg;
+          recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024)).toFixed(1)} MB)...`;
+        } else if (msg.type === "cancel") {
+          isCancelled = true;
+          cleanupConnections();
+          resetReceiverUI("Transfer cancelled by sender.");
+        } else if (msg.type === "complete") {
+          recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Ready to save.`;
+          btnDownload.style.display = "block";
+          btnDownload.innerText = `Save ${fileMeta.name}`;
+          btnRecvRun.disabled = false;
+          btnRecvCancel.style.display = "none";
+        }
+      };
+    } else if (ch.label === "fileTransfer") {
+      dataChannel = ch;
+      dataChannel.binaryType = "arraybuffer";
+
+      dataChannel.onmessage = (e) => {
+        if (isCancelled) return;
+        receivedBuffers.push(e.data);
+        receivedBytesTotal += e.data.byteLength;
+
+        if (fileMeta && fileMeta.size) {
+          const pct = Math.round((receivedBytesTotal / fileMeta.size) * 100);
+          recvProgress.value = pct;
+          recvProgressLabel.innerText = `Received: ${pct}% (${(receivedBytesTotal / (1024*1024)).toFixed(1)} MB / ${(fileMeta.size / (1024*1024)).toFixed(1)} MB)`;
+        }
+      };
+    }
+  };
 });
 
 btnDownload.addEventListener("click", () => {
-  if (receivedBlobs.length === 0) return;
-  const finalBlob = new Blob(receivedBlobs, { type: "application/octet-stream" });
+  if (receivedBuffers.length === 0 || !fileMeta) return;
+  const finalBlob = new Blob(receivedBuffers, { type: "application/octet-stream" });
   const url = URL.createObjectURL(finalBlob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = meta.name;
+  a.download = fileMeta.name;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
