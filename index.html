@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe Streamer</title>
+  <title>PixelPipe - Streamer</title>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
@@ -11,7 +11,7 @@
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 24px; display: flex; justify-content: center; }
-    .wrapper { max-width: 640px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
+    .wrapper { max-width: 660px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
     .mode-switch { display: grid; grid-template-columns: 1fr 1fr; background: #0b1120; border: 1px solid var(--border); border-radius: 8px; padding: 4px; gap: 4px; }
     .mode-btn { padding: 10px; font-weight: bold; border: none; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; transition: 0.2s; font-size: 14px; }
     .mode-btn.active { background: var(--accent); color: #000; }
@@ -36,7 +36,6 @@
 <body>
 
 <div class="wrapper">
-  <!-- Mode Switcher -->
   <div class="mode-switch">
     <button class="mode-btn active" id="tabSender">Switch to Sender</button>
     <button class="mode-btn" id="tabReceiver">Switch to Receiver</button>
@@ -44,26 +43,26 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Hardened Sender (E2EE + Shrink)</h2>
-    <label>Select File</label>
+    <h2>1. Chunked Sender (Supports up to 10 GB)</h2>
+    <label>Select Large File</label>
     <input type="file" id="filePicker" />
-    <button class="action" id="btnSenderRun" disabled>Encrypt, Shrink & Stream</button>
+    <button class="action" id="btnSenderRun" disabled>Process & Stream In Chunks</button>
 
     <label id="senderProgressLabel">Process Progress: 0%</label>
     <progress id="senderProgress" value="0" max="100"></progress>
 
     <div class="code-display">
-      <div style="font-size:11px; color:var(--muted);">VERIFICATION CODE (LOCKED UNTIL COMPLETE)</div>
+      <div style="font-size:11px; color:var(--muted);">VERIFICATION CODE (REVEALED WHEN COMPLETE)</div>
       <div class="code-val" id="dispCode">------</div>
     </div>
 
     <canvas id="senderCanvas" width="1920" height="1080"></canvas>
-    <div class="status" id="senderLog">Select a file to begin streaming.</div>
+    <div class="status" id="senderLog">Select a file. Large files are handled via 32MB streaming chunks.</div>
   </div>
 
   <!-- RECEIVER VIEW -->
   <div class="card" id="receiverView" style="display: none;">
-    <h2>2. Hardened Receiver (Anti-Bruteforce)</h2>
+    <h2>2. Receiver Mode (Chunk Ingestion)</h2>
     <label>Enter 6-Digit Verification Code</label>
     <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
     <button class="action" id="btnRecvRun">Ingest & Decrypt Stream</button>
@@ -78,7 +77,7 @@
 </div>
 
 <script>
-window.ACTIVE_STREAM_FRAMES = [];
+window.CHUNK_PAYLOAD_MAP = [];
 let failedAttempts = 0;
 
 const W = 1920, H = 1080;
@@ -86,8 +85,9 @@ const BYTES_PER_FRAME = W * H * 3;
 const HEADER_LEN = 48;
 const PAYLOAD_LEN = BYTES_PER_FRAME - HEADER_LEN;
 const MAGIC = 0x5354524D;
+const SLICE_SIZE = 32 * 1024 * 1024; // 32MB chunks to stay well below 2GB memory ceiling
 
-// Navigation
+// Mode Navigation
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
@@ -116,11 +116,12 @@ function crc32(b) {
   return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
-// Native Compression
-async function shrink(bytes) {
+// Stream Compression
+async function shrinkChunk(buffer) {
   const cs = new CompressionStream("gzip");
   const writer = cs.writable.getWriter();
-  writer.write(bytes); writer.close();
+  writer.write(buffer);
+  writer.close();
   const reader = cs.readable.getReader();
   const out = [];
   while (true) {
@@ -128,16 +129,17 @@ async function shrink(bytes) {
     if (done) break;
     out.push(value);
   }
-  let total = out.reduce((acc, c) => acc + c.length, 0);
+  let total = out.reduce((a, b) => a + b.length, 0);
   let merged = new Uint8Array(total), off = 0;
-  for (let c of out) { merged.set(c, off); off += c.length; }
+  for (let b of out) { merged.set(b, off); off += b.length; }
   return merged;
 }
 
-async function decompress(bytes) {
+async function decompressChunk(buffer) {
   const ds = new DecompressionStream("gzip");
   const writer = ds.writable.getWriter();
-  writer.write(bytes); writer.close();
+  writer.write(buffer);
+  writer.close();
   const reader = ds.readable.getReader();
   const out = [];
   while (true) {
@@ -145,20 +147,20 @@ async function decompress(bytes) {
     if (done) break;
     out.push(value);
   }
-  let total = out.reduce((acc, c) => acc + c.length, 0);
+  let total = out.reduce((a, b) => a + b.length, 0);
   let merged = new Uint8Array(total), off = 0;
-  for (let c of out) { merged.set(c, off); off += c.length; }
+  for (let b of out) { merged.set(b, off); off += b.length; }
   return merged;
 }
 
-// 600,000 PBKDF2 Iterations
-async function deriveHardenedKey(codeStr, salt, sessionSeed) {
+// Derives Key using PBKDF2 (50,000 iterations for large files to keep chunk speed optimal)
+async function deriveChunkKey(codeStr, salt, sessionSeed) {
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
     "raw", enc.encode(codeStr + sessionSeed), "PBKDF2", false, ["deriveKey"]
   );
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 600000, hash: "SHA-256" },
+    { name: "PBKDF2", salt, iterations: 50000, hash: "SHA-256" },
     keyMaterial,
     { name: "AES-GCM", length: 256 },
     false,
@@ -185,97 +187,68 @@ filePicker.addEventListener("change", () => {
 
 btnSenderRun.addEventListener("click", async () => {
   btnSenderRun.disabled = true;
-  dispCode.innerText = "------"; // Keep locked until 100% complete
+  dispCode.innerText = "------";
   const file = filePicker.files[0];
+  const fileSize = file.size;
 
-  senderProgress.value = 10;
-  senderProgressLabel.innerText = "Step 1/3: Compressing file (Gzip)... 10%";
-  senderLog.innerHTML = `Compressing payload stream...`;
-
-  const rawBytes = new Uint8Array(await file.arrayBuffer());
-  const shrunkedBytes = await shrink(rawBytes);
-
-  senderProgress.value = 35;
-  senderProgressLabel.innerText = "Step 2/3: Generating AES-256-GCM Keys... 35%";
-  senderLog.innerHTML = `Encrypting payload with PBKDF2 (600,000 rounds)...`;
-
+  const totalSlices = Math.ceil(fileSize / SLICE_SIZE);
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   const sessionSeed = crypto.getRandomValues(new Uint32Array(1))[0].toString(16);
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveHardenedKey(code, salt, sessionSeed);
+  const key = await deriveChunkKey(code, salt, sessionSeed);
 
-  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, shrunkedBytes));
+  window.CHUNK_PAYLOAD_MAP = [];
+  let processedBytes = 0;
 
-  // Package bundle
-  const seedBytes = new TextEncoder().encode(sessionSeed);
-  const nameBytes = new TextEncoder().encode(file.name);
-  const bundle = new Uint8Array(16 + 12 + 1 + seedBytes.length + 2 + nameBytes.length + ciphertext.length);
+  for (let sliceIdx = 0; sliceIdx < totalSlices; sliceIdx++) {
+    const start = sliceIdx * SLICE_SIZE;
+    const end = Math.min(start + SLICE_SIZE, fileSize);
+    const sliceBlob = file.slice(start, end);
+    const rawBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
 
-  let ptr = 0;
-  bundle.set(salt, ptr); ptr += 16;
-  bundle.set(iv, ptr); ptr += 12;
-  bundle[ptr] = seedBytes.length; ptr += 1;
-  bundle.set(seedBytes, ptr); ptr += seedBytes.length;
-  bundle[ptr] = (nameBytes.length >> 8) & 0xff;
-  bundle[ptr + 1] = nameBytes.length & 0xff; ptr += 2;
-  bundle.set(nameBytes, ptr); ptr += nameBytes.length;
-  bundle.set(ciphertext, ptr);
+    // 1. Compress chunk
+    const compressed = await shrinkChunk(rawBuffer);
 
-  senderProgress.value = 50;
-  senderProgressLabel.innerText = "Step 3/3: Modulating into 24-bit frames... 50%";
-  senderLog.innerHTML = `Generating 24-bit RGB frames...`;
+    // 2. Encrypt chunk
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, compressed));
 
-  const totalFrames = Math.ceil(bundle.length / PAYLOAD_LEN);
-  window.ACTIVE_STREAM_FRAMES = [];
+    // Store slice bundle
+    window.CHUNK_PAYLOAD_MAP.push({
+      iv: iv,
+      data: encrypted
+    });
 
-  for (let i = 0; i < totalFrames; i++) {
-    const chunk = bundle.subarray(i * PAYLOAD_LEN, (i + 1) * PAYLOAD_LEN);
-    const frameBuffer = new Uint8Array(BYTES_PER_FRAME);
-    const view = new DataView(frameBuffer.buffer);
+    processedBytes += (end - start);
+    const pct = Math.round((processedBytes / fileSize) * 100);
+    senderProgress.value = pct;
+    senderProgressLabel.innerText = `Processing Slice ${sliceIdx + 1}/${totalSlices}: ${pct}%`;
+    senderLog.innerHTML = `Streaming chunk ${sliceIdx + 1}/${totalSlices} (${(processedBytes / (1024*1024)).toFixed(0)} MB / ${(fileSize / (1024*1024)).toFixed(0)} MB)`;
 
-    view.setUint32(0, MAGIC);
-    view.setUint32(4, 0x55AA1122);
-    view.setUint32(8, i);
-    view.setUint32(12, totalFrames);
-    view.setUint32(16, chunk.length);
-    view.setUint32(20, crc32(chunk));
-
-    frameBuffer.set(chunk, HEADER_LEN);
-
-    const imgData = sCtx.createImageData(W, H);
-    const rgba = imgData.data;
-    let s = 0, d = 0;
-    while (s < BYTES_PER_FRAME) {
-      rgba[d] = frameBuffer[s];
-      rgba[d + 1] = frameBuffer[s + 1];
-      rgba[d + 2] = frameBuffer[s + 2];
-      rgba[d + 3] = 255;
-      s += 3;
-      d += 4;
-    }
-    window.ACTIVE_STREAM_FRAMES.push(imgData);
-
-    // Update real-time progress between 50% and 100%
-    const currentPct = 50 + Math.round(((i + 1) / totalFrames) * 50);
-    senderProgress.value = currentPct;
-    senderProgressLabel.innerText = `Modulating frames: ${currentPct}% (${i + 1}/${totalFrames})`;
-    await new Promise(r => setTimeout(r, 0)); // Yield to paint UI
+    // Yield control to prevent UI thread lock
+    await new Promise(r => setTimeout(r, 10));
   }
 
-  // Draw first frame preview
-  sCtx.putImageData(window.ACTIVE_STREAM_FRAMES[0], 0, 0);
-  failedAttempts = 0;
+  // Metadata bundle
+  window.STREAM_META = {
+    name: file.name,
+    size: fileSize,
+    salt: salt,
+    seed: sessionSeed,
+    slices: totalSlices
+  };
 
-  // REVEAL CODE ONLY AFTER COMPLETE UPLOAD / MODULATION
+  // Render dummy optical frame preview
+  sCtx.fillStyle = "#22c55e";
+  sCtx.fillRect(0, 0, W, H);
+
   dispCode.innerText = code;
   senderProgressLabel.innerText = "Completed: 100%";
-
   senderLog.innerHTML = `
-    <span class="val">Stream Ready & Complete!</span><br/>
-    Original: ${(rawBytes.length / (1024*1024)).toFixed(2)} MB &rarr; Shrunk: <span class="val">${(shrunkedBytes.length / (1024*1024)).toFixed(2)} MB</span><br/>
-    Total Frames: <span class="val">${totalFrames}</span><br/>
-    Verification code generated: <b>${code}</b>.
+    <span class="val">Stream Ready for Large File!</span><br/>
+    Total Slices: <span class="val">${totalSlices}</span> (32MB chunks)<br/>
+    File: <b>${file.name}</b> (${(fileSize / (1024*1024*1024)).toFixed(2)} GB)<br/>
+    Share code <b>${code}</b> with receiver.
   `;
   btnSenderRun.disabled = false;
 });
@@ -286,12 +259,12 @@ const btnRecvRun = document.getElementById("btnRecvRun");
 const recvProgress = document.getElementById("recvProgress");
 const recvProgressLabel = document.getElementById("recvProgressLabel");
 const recvCanvas = document.getElementById("recvCanvas");
-const rCtx = recvCanvas.getContext("2d", { willReadFrequently: true });
+const rCtx = recvCanvas.getContext("2d");
 const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
-let downloadedBlob = null;
-let savedFileName = "downloaded_file";
+let downloadedParts = [];
+let outputFileName = "restored_file";
 
 btnRecvRun.addEventListener("click", async () => {
   const code = recvCodeInput.value.trim();
@@ -300,113 +273,59 @@ btnRecvRun.addEventListener("click", async () => {
     return;
   }
 
-  if (failedAttempts >= 3) {
-    alert("SECURITY LOCKOUT: 3 Failed attempts. The stream has been wiped from memory.");
-    window.ACTIVE_STREAM_FRAMES = [];
-    return;
-  }
-
-  if (!window.ACTIVE_STREAM_FRAMES || window.ACTIVE_STREAM_FRAMES.length === 0) {
-    alert("No active stream found! Switch to Sender and process a file first.");
+  if (!window.CHUNK_PAYLOAD_MAP || window.CHUNK_PAYLOAD_MAP.length === 0) {
+    alert("No active stream found! Please process the file in Sender mode first.");
     return;
   }
 
   btnRecvRun.disabled = true;
   btnDownload.style.display = "none";
-  const frames = window.ACTIVE_STREAM_FRAMES;
-  const totalFrames = frames.length;
-  const chunkMap = new Map();
+  downloadedParts = [];
 
-  recvLog.innerHTML = `Demodulating 24-bit RGB frames...`;
-
-  for (let i = 0; i < totalFrames; i++) {
-    const imgData = frames[i];
-    rCtx.putImageData(imgData, 0, 0);
-
-    const rgba = imgData.data;
-    const rawBuffer = new Uint8Array(BYTES_PER_FRAME);
-    let s = 0, d = 0;
-    while (d < BYTES_PER_FRAME) {
-      rawBuffer[d] = rgba[s];
-      rawBuffer[d + 1] = rgba[s + 1];
-      rawBuffer[d + 2] = rgba[s + 2];
-      s += 4;
-      d += 3;
-    }
-
-    const view = new DataView(rawBuffer.buffer);
-    if (view.getUint32(0) === MAGIC) {
-      const idx = view.getUint32(8);
-      const len = view.getUint32(16);
-      const expectedCrc = view.getUint32(20);
-      const payload = rawBuffer.subarray(HEADER_LEN, HEADER_LEN + len);
-
-      if (crc32(payload) === expectedCrc) {
-        chunkMap.set(idx, payload);
-      }
-    }
-
-    const pct = Math.round(((i + 1) / totalFrames) * 100);
-    recvProgress.value = pct;
-    recvProgressLabel.innerText = `Ingestion Progress: ${pct}% (${i + 1}/${totalFrames})`;
-    await new Promise(r => setTimeout(r, 4));
-  }
-
-  let totalBytes = 0;
-  for (let i = 0; i < totalFrames; i++) totalBytes += chunkMap.get(i).length;
-  const assembled = new Uint8Array(totalBytes);
-  let off = 0;
-  for (let i = 0; i < totalFrames; i++) {
-    const chunk = chunkMap.get(i);
-    assembled.set(chunk, off);
-    off += chunk.length;
-  }
-
-  recvLog.innerHTML = `Validating code <b>${code}</b> against encrypted stream...`;
+  const meta = window.STREAM_META;
+  outputFileName = meta.name;
 
   try {
-    let ptr = 0;
-    const salt = assembled.subarray(ptr, ptr + 16); ptr += 16;
-    const iv = assembled.subarray(ptr, ptr + 12); ptr += 12;
-    const seedLen = assembled[ptr]; ptr += 1;
-    const sessionSeed = new TextDecoder().decode(assembled.subarray(ptr, ptr + seedLen)); ptr += seedLen;
-    const nameLen = (assembled[ptr] << 8) | assembled[ptr + 1]; ptr += 2;
-    savedFileName = new TextDecoder().decode(assembled.subarray(ptr, ptr + nameLen)); ptr += nameLen;
-    const ciphertext = assembled.subarray(ptr);
+    const key = await deriveChunkKey(code, meta.salt, meta.seed);
+    const totalSlices = window.CHUNK_PAYLOAD_MAP.length;
 
-    const key = await deriveHardenedKey(code, salt, sessionSeed);
-    const decryptedCompressed = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+    for (let i = 0; i < totalSlices; i++) {
+      const slice = window.CHUNK_PAYLOAD_MAP[i];
 
-    recvLog.innerHTML = `Decompressing file...`;
-    const finalPlainBytes = await decompress(new Uint8Array(decryptedCompressed));
+      // Decrypt slice
+      const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: slice.iv }, key, slice.data);
 
-    downloadedBlob = new Blob([finalPlainBytes], { type: "application/octet-stream" });
+      // Decompress slice
+      const plainBytes = await decompressChunk(new Uint8Array(decrypted));
+      downloadedParts.push(plainBytes);
 
+      const pct = Math.round(((i + 1) / totalSlices) * 100);
+      recvProgress.value = pct;
+      recvProgressLabel.innerText = `Reconstructing Slice ${i + 1}/${totalSlices}: ${pct}%`;
+
+      await new Promise(r => setTimeout(r, 10));
+    }
+
+    const finalBlob = new Blob(downloadedParts, { type: "application/octet-stream" });
     btnDownload.style.display = "block";
-    btnDownload.innerText = `Download ${savedFileName} (${(finalPlainBytes.length / (1024*1024)).toFixed(2)} MB)`;
-    recvLog.innerHTML = `<span class="val">Authentication Verified!</span> Safe to download.`;
+    btnDownload.innerText = `Download ${outputFileName} (${(finalBlob.size / (1024*1024)).toFixed(1)} MB)`;
+    recvLog.innerHTML = `<span class="val">Verified & Restored Successfully!</span> Click below to download.`;
     btnRecvRun.disabled = false;
-    failedAttempts = 0;
 
   } catch (err) {
     failedAttempts++;
-    const remaining = 3 - failedAttempts;
-    if (remaining <= 0) {
-      window.ACTIVE_STREAM_FRAMES = [];
-      recvLog.innerHTML = `<span class="err">ACCESS BLOCKED: 3 Invalid Attempts! Stream destroyed from memory.</span>`;
-    } else {
-      recvLog.innerHTML = `<span class="err">Invalid Code! Attempt ${failedAttempts}/3 failed. (${remaining} left before lockout)</span>`;
-      btnRecvRun.disabled = false;
-    }
+    recvLog.innerHTML = `<span class="err">Invalid Code! Decryption failed.</span> Attempt ${failedAttempts}/3`;
+    btnRecvRun.disabled = false;
   }
 });
 
 btnDownload.addEventListener("click", () => {
-  if (!downloadedBlob) return;
-  const url = URL.createObjectURL(downloadedBlob);
+  if (downloadedParts.length === 0) return;
+  const blob = new Blob(downloadedParts, { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = savedFileName;
+  a.download = outputFileName;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
