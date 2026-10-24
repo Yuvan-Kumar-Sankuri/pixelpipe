@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Hardened 24-Bit Optical Streamer</title>
+  <style>
+    :root {
+      --bg: #090d16; --card: #131b2e; --border: #233354;
+      --accent: #38bdf8; --green: #22c55e; --red: #ef4444; --text: #f1f5f9; --muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 24px; display: flex; justify-content: center; }
+    .wrapper { max-width: 640px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
+    .mode-switch { display: grid; grid-template-columns: 1fr 1fr; background: #0b1120; border: 1px solid var(--border); border-radius: 8px; padding: 4px; gap: 4px; }
+    .mode-btn { padding: 10px; font-weight: bold; border: none; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; transition: 0.2s; font-size: 14px; }
+    .mode-btn.active { background: var(--accent); color: #000; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+    h2 { font-size: 16px; color: var(--accent); }
+    label { font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: bold; }
+    input[type="file"] { padding: 10px; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; color: #fff; width: 100%; }
+    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 24px; text-align: center; letter-spacing: 6px; font-weight: bold; width: 100%; }
+    input[type="text"]:focus { border-color: var(--accent); outline: none; }
+    button.action { padding: 12px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; background: var(--accent); color: #000; transition: 0.2s; }
+    button.action:disabled { opacity: 0.35; cursor: not-allowed; }
+    .code-display { background: #0b1120; border: 2px dashed var(--green); border-radius: 8px; padding: 14px; text-align: center; }
+    .code-val { font-size: 32px; font-weight: 900; color: var(--green); letter-spacing: 6px; margin-top: 4px; }
+    canvas { width: 100%; height: 240px; background: #000; border-radius: 6px; border: 1px solid var(--border); object-fit: contain; }
+    .status { font-size: 12px; color: var(--muted); line-height: 1.5; background: #0b1120; padding: 10px; border-radius: 6px; border: 1px solid var(--border); }
+    .val { color: var(--green); font-weight: bold; }
+    .err { color: var(--red); font-weight: bold; }
+    progress { width: 100%; height: 8px; accent-color: var(--green); }
+    .btn-download { background: var(--green); color: #000; display: none; padding: 14px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; }
+  </style>
+</head>
+<body>
+
+<div class="wrapper">
+  <div class="mode-switch">
+    <button class="mode-btn active" id="tabSender">Switch to Sender</button>
+    <button class="mode-btn" id="tabReceiver">Switch to Receiver</button>
+  </div>
+
+  <!-- SENDER VIEW -->
+  <div class="card" id="senderView">
+    <h2>1. Hardened Sender (E2EE + Shrink)</h2>
+    <label>Select File</label>
+    <input type="file" id="filePicker" />
+    <button class="action" id="btnSenderRun" disabled>Encrypt, Shrink & Stream</button>
+
+    <div class="code-display">
+      <div style="font-size:11px; color:var(--muted);">ONE-TIME HARDENED VERIFICATION CODE</div>
+      <div class="code-val" id="dispCode">------</div>
+    </div>
+
+    <canvas id="senderCanvas" width="1920" height="1080"></canvas>
+    <div class="status" id="senderLog">Select a file to begin streaming.</div>
+  </div>
+
+  <!-- RECEIVER VIEW -->
+  <div class="card" id="receiverView" style="display: none;">
+    <h2>2. Hardened Receiver (Anti-Bruteforce)</h2>
+    <label>Enter 6-Digit Verification Code</label>
+    <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
+    <button class="action" id="btnRecvRun">Ingest & Decrypt Stream</button>
+
+    <canvas id="recvCanvas" width="1920" height="1080"></canvas>
+    <progress id="recvProgress" value="0" max="100"></progress>
+    <div class="status" id="recvLog">Enter the code and click Ingest. Remaining Attempts: 3/3</div>
+    <button class="btn-download" id="btnDownload">Download File</button>
+  </div>
+</div>
+
+<script>
+window.ACTIVE_STREAM_FRAMES = [];
+let failedAttempts = 0;
+
+const W = 1920, H = 1080;
+const BYTES_PER_FRAME = W * H * 3;
+const HEADER_LEN = 48;
+const PAYLOAD_LEN = BYTES_PER_FRAME - HEADER_LEN;
+const MAGIC = 0x5354524D;
+
+// Navigation Tabs
+const tabSender = document.getElementById("tabSender");
+const tabReceiver = document.getElementById("tabReceiver");
+const senderView = document.getElementById("senderView");
+const receiverView = document.getElementById("receiverView");
+
+tabSender.addEventListener("click", () => {
+  tabSender.classList.add("active"); tabReceiver.classList.remove("active");
+  senderView.style.display = "flex"; receiverView.style.display = "none";
+});
+
+tabReceiver.addEventListener("click", () => {
+  tabReceiver.classList.add("active"); tabSender.classList.remove("active");
+  receiverView.style.display = "flex"; senderView.style.display = "none";
+});
+
+// CRC-32
+const CRC_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i;
+  for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+  CRC_TABLE[i] = c;
+}
+function crc32(b) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Native Compression
+async function shrink(bytes) {
+  const cs = new CompressionStream("gzip");
+  const writer = cs.writable.getWriter();
+  writer.write(bytes); writer.close();
+  const reader = cs.readable.getReader();
+  const out = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out.push(value);
+  }
+  let total = out.reduce((acc, c) => acc + c.length, 0);
+  let merged = new Uint8Array(total), off = 0;
+  for (let c of out) { merged.set(c, off); off += c.length; }
+  return merged;
+}
+
+async function decompress(bytes) {
+  const ds = new DecompressionStream("gzip");
+  const writer = ds.writable.getWriter();
+  writer.write(bytes); writer.close();
+  const reader = ds.readable.getReader();
+  const out = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out.push(value);
+  }
+  let total = out.reduce((acc, c) => acc + c.length, 0);
+  let merged = new Uint8Array(total), off = 0;
+  for (let c of out) { merged.set(c, off); off += c.length; }
+  return merged;
+}
+
+// Hardened Key Derivation: 600,000 PBKDF2 Iterations + Salt + Session Hash
+async function deriveHardenedKey(codeStr, salt, sessionSeed) {
+  const enc = new TextEncoder();
+  // Combines Code with Session Seed so raw code is useless on other streams
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", enc.encode(codeStr + sessionSeed), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 600000, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+// --- SENDER ---
+const filePicker = document.getElementById("filePicker");
+const btnSenderRun = document.getElementById("btnSenderRun");
+const dispCode = document.getElementById("dispCode");
+const senderCanvas = document.getElementById("senderCanvas");
+const sCtx = senderCanvas.getContext("2d", { willReadFrequently: true });
+const senderLog = document.getElementById("senderLog");
+
+filePicker.addEventListener("change", () => {
+  btnSenderRun.disabled = filePicker.files.length === 0;
+});
+
+btnSenderRun.addEventListener("click", async () => {
+  btnSenderRun.disabled = true;
+  const file = filePicker.files[0];
+
+  // 1. Generate 6-Digit Code & Session Randomizer
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const sessionSeed = crypto.getRandomValues(new Uint32Array(1))[0].toString(16);
+  dispCode.innerText = code;
+
+  senderLog.innerHTML = `Step 1/3: Compressing file with Gzip...`;
+  const rawBytes = new Uint8Array(await file.arrayBuffer());
+  const shrunkedBytes = await shrink(rawBytes);
+
+  senderLog.innerHTML = `Step 2/3: Generating 600k-iteration AES-256 Key...`;
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveHardenedKey(code, salt, sessionSeed);
+
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, shrunkedBytes));
+
+  // Bundle: [Salt 16B] + [IV 12B] + [SeedLen 1B] + [Seed] + [NameLen 2B] + [Name] + [Ciphertext]
+  const seedBytes = new TextEncoder().encode(sessionSeed);
+  const nameBytes = new TextEncoder().encode(file.name);
+  const bundle = new Uint8Array(16 + 12 + 1 + seedBytes.length + 2 + nameBytes.length + ciphertext.length);
+
+  let ptr = 0;
+  bundle.set(salt, ptr); ptr += 16;
+  bundle.set(iv, ptr); ptr += 12;
+  bundle[ptr] = seedBytes.length; ptr += 1;
+  bundle.set(seedBytes, ptr); ptr += seedBytes.length;
+  bundle[ptr] = (nameBytes.length >> 8) & 0xff;
+  bundle[ptr + 1] = nameBytes.length & 0xff; ptr += 2;
+  bundle.set(nameBytes, ptr); ptr += nameBytes.length;
+  bundle.set(ciphertext, ptr);
+
+  senderLog.innerHTML = `Step 3/3: Modulating into 24-bit RGB frames...`;
+  const totalFrames = Math.ceil(bundle.length / PAYLOAD_LEN);
+  window.ACTIVE_STREAM_FRAMES = [];
+
+  for (let i = 0; i < totalFrames; i++) {
+    const chunk = bundle.subarray(i * PAYLOAD_LEN, (i + 1) * PAYLOAD_LEN);
+    const frameBuffer = new Uint8Array(BYTES_PER_FRAME);
+    const view = new DataView(frameBuffer.buffer);
+
+    view.setUint32(0, MAGIC);
+    view.setUint32(4, 0x55AA1122);
+    view.setUint32(8, i);
+    view.setUint32(12, totalFrames);
+    view.setUint32(16, chunk.length);
+    view.setUint32(20, crc32(chunk));
+
+    frameBuffer.set(chunk, HEADER_LEN);
+
+    const imgData = sCtx.createImageData(W, H);
+    const rgba = imgData.data;
+    let s = 0, d = 0;
+    while (s < BYTES_PER_FRAME) {
+      rgba[d] = frameBuffer[s];
+      rgba[d + 1] = frameBuffer[s + 1];
+      rgba[d + 2] = frameBuffer[s + 2];
+      rgba[d + 3] = 255;
+      s += 3;
+      d += 4;
+    }
+    window.ACTIVE_STREAM_FRAMES.push(imgData);
+  }
+
+  sCtx.putImageData(window.ACTIVE_STREAM_FRAMES[0], 0, 0);
+  failedAttempts = 0; // Reset brute-force counter
+
+  senderLog.innerHTML = `
+    <span class="val">Stream Ready & Hardened!</span><br/>
+    Original: ${(rawBytes.length / (1024*1024)).toFixed(2)} MB &rarr; Shrunk: <span class="val">${(shrunkedBytes.length / (1024*1024)).toFixed(2)} MB</span><br/>
+    Frames: <span class="val">${totalFrames}</span> (6.22 MB/frame)<br/>
+    Code <b>${code}</b> is bound cryptographically to this single session.
+  `;
+  btnSenderRun.disabled = false;
+});
+
+// --- RECEIVER ---
+const recvCodeInput = document.getElementById("recvCodeInput");
+const btnRecvRun = document.getElementById("btnRecvRun");
+const recvCanvas = document.getElementById("recvCanvas");
+const rCtx = recvCanvas.getContext("2d", { willReadFrequently: true });
+const recvProgress = document.getElementById("recvProgress");
+const recvLog = document.getElementById("recvLog");
+const btnDownload = document.getElementById("btnDownload");
+
+let downloadedBlob = null;
+let savedFileName = "downloaded_file";
+
+btnRecvRun.addEventListener("click", async () => {
+  const code = recvCodeInput.value.trim();
+  if (code.length !== 6) {
+    alert("Please enter the complete 6-digit verification code!");
+    return;
+  }
+
+  if (failedAttempts >= 3) {
+    alert("SECURITY LOCKOUT: 3 Failed attempts. The stream has been wiped from memory.");
+    window.ACTIVE_STREAM_FRAMES = [];
+    return;
+  }
+
+  if (!window.ACTIVE_STREAM_FRAMES || window.ACTIVE_STREAM_FRAMES.length === 0) {
+    alert("No active stream found! Switch to Sender and process a file first.");
+    return;
+  }
+
+  btnRecvRun.disabled = true;
+  btnDownload.style.display = "none";
+  const frames = window.ACTIVE_STREAM_FRAMES;
+  const totalFrames = frames.length;
+  const chunkMap = new Map();
+
+  recvLog.innerHTML = `Demodulating 24-bit RGB frames...`;
+
+  for (let i = 0; i < totalFrames; i++) {
+    const imgData = frames[i];
+    rCtx.putImageData(imgData, 0, 0);
+
+    const rgba = imgData.data;
+    const rawBuffer = new Uint8Array(BYTES_PER_FRAME);
+    let s = 0, d = 0;
+    while (d < BYTES_PER_FRAME) {
+      rawBuffer[d] = rgba[s];
+      rawBuffer[d + 1] = rgba[s + 1];
+      rawBuffer[d + 2] = rgba[s + 2];
+      s += 4;
+      d += 3;
+    }
+
+    const view = new DataView(rawBuffer.buffer);
+    if (view.getUint32(0) === MAGIC) {
+      const idx = view.getUint32(8);
+      const len = view.getUint32(16);
+      const expectedCrc = view.getUint32(20);
+      const payload = rawBuffer.subarray(HEADER_LEN, HEADER_LEN + len);
+
+      if (crc32(payload) === expectedCrc) {
+        chunkMap.set(idx, payload);
+      }
+    }
+
+    recvProgress.value = Math.round((chunkMap.size / totalFrames) * 100);
+    await new Promise(r => setTimeout(r, 6));
+  }
+
+  let totalBytes = 0;
+  for (let i = 0; i < totalFrames; i++) totalBytes += chunkMap.get(i).length;
+  const assembled = new Uint8Array(totalBytes);
+  let off = 0;
+  for (let i = 0; i < totalFrames; i++) {
+    const chunk = chunkMap.get(i);
+    assembled.set(chunk, off);
+    off += chunk.length;
+  }
+
+  recvLog.innerHTML = `Validating code <b>${code}</b> against encrypted stream...`;
+
+  try {
+    let ptr = 0;
+    const salt = assembled.subarray(ptr, ptr + 16); ptr += 16;
+    const iv = assembled.subarray(ptr, ptr + 12); ptr += 12;
+    const seedLen = assembled[ptr]; ptr += 1;
+    const sessionSeed = new TextDecoder().decode(assembled.subarray(ptr, ptr + seedLen)); ptr += seedLen;
+    const nameLen = (assembled[ptr] << 8) | assembled[ptr + 1]; ptr += 2;
+    savedFileName = new TextDecoder().decode(assembled.subarray(ptr, ptr + nameLen)); ptr += nameLen;
+    const ciphertext = assembled.subarray(ptr);
+
+    // Cryptographic derivation: Fails instantly if code is off by 1 digit
+    const key = await deriveHardenedKey(code, salt, sessionSeed);
+    const decryptedCompressed = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+
+    recvLog.innerHTML = `Decompressing file...`;
+    const finalPlainBytes = await decompress(new Uint8Array(decryptedCompressed));
+
+    downloadedBlob = new Blob([finalPlainBytes], { type: "application/octet-stream" });
+
+    btnDownload.style.display = "block";
+    btnDownload.innerText = `Download ${savedFileName} (${(finalPlainBytes.length / (1024*1024)).toFixed(2)} MB)`;
+    recvLog.innerHTML = `<span class="val">Authentication Verified!</span> Safe to download.`;
+    btnRecvRun.disabled = false;
+    failedAttempts = 0;
+
+  } catch (err) {
+    failedAttempts++;
+    const remaining = 3 - failedAttempts;
+    if (remaining <= 0) {
+      window.ACTIVE_STREAM_FRAMES = []; // Self-destruct stream from RAM
+      recvLog.innerHTML = `<span class="err">ACCESS BLOCKED: 3 Invalid Attempts! Stream destroyed from memory.</span>`;
+    } else {
+      recvLog.innerHTML = `<span class="err">Invalid Code! Attempt ${failedAttempts}/3 failed. (${remaining} left before lockout)</span>`;
+      btnRecvRun.disabled = false;
+    }
+  }
+});
+
+btnDownload.addEventListener("click", () => {
+  if (!downloadedBlob) return;
+  const url = URL.createObjectURL(downloadedBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = savedFileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
