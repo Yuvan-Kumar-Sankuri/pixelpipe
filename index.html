@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - High-Speed Same-Room Local Drop</title>
+  <title>PixelPipe - High-Speed 6-Digit Local Transfer</title>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
@@ -19,7 +19,7 @@
     h2 { font-size: 16px; color: var(--accent); }
     label { font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: bold; }
     input[type="file"] { padding: 10px; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; color: #fff; width: 100%; }
-    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 24px; text-align: center; letter-spacing: 6px; font-weight: bold; width: 100%; }
+    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 26px; text-align: center; letter-spacing: 6px; font-weight: bold; width: 100%; }
     input[type="text"]:focus { border-color: var(--accent); outline: none; }
     
     .btn-row { display: flex; gap: 10px; }
@@ -29,14 +29,14 @@
     button.cancel-btn:hover { filter: brightness(1.15); }
 
     .code-display { background: #0b1120; border: 2px dashed var(--green); border-radius: 8px; padding: 14px; text-align: center; }
-    .code-val { font-size: 32px; font-weight: 900; color: var(--green); letter-spacing: 6px; margin-top: 4px; }
+    .code-val { font-size: 34px; font-weight: 900; color: var(--green); letter-spacing: 6px; margin-top: 4px; }
 
+    .stats { display: flex; justify-content: space-between; font-size: 12px; font-weight: bold; color: var(--accent); }
     .status { font-size: 12px; color: var(--muted); line-height: 1.5; background: #0b1120; padding: 10px; border-radius: 6px; border: 1px solid var(--border); }
     .val { color: var(--green); font-weight: bold; }
     .err { color: var(--red); font-weight: bold; }
     progress { width: 100%; height: 8px; accent-color: var(--green); }
     .btn-download { background: var(--green); color: #000; display: none; padding: 14px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; text-align: center; text-decoration: none; }
-    .stats { display: flex; justify-content: space-between; font-size: 12px; font-weight: bold; color: var(--accent); }
   </style>
 </head>
 <body>
@@ -50,17 +50,17 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Local Drop (Sender)</h2>
+    <h2>1. Sender Mode</h2>
     <label>Select 4 GB File</label>
     <input type="file" id="filePicker" />
     
     <div class="btn-row">
-      <button class="action" id="btnSenderRun" disabled>Open Local Pipe</button>
+      <button class="action" id="btnSenderRun" disabled>Create 6-Digit Room</button>
       <button class="cancel-btn" id="btnSenderCancel">Cancel Transfer</button>
     </div>
 
     <div class="code-display">
-      <div style="font-size:11px; color:var(--muted);">LOCAL ROOM CODE</div>
+      <div style="font-size:11px; color:var(--muted);">GIVE THIS 6-DIGIT CODE TO RECEIVER</div>
       <div class="code-val" id="dispCode">------</div>
     </div>
 
@@ -69,17 +69,17 @@
       <span id="senderSpeedLabel">0.0 MB/s</span>
     </div>
     <progress id="senderProgress" value="0" max="100"></progress>
-    <div class="status" id="senderLog">Select a file. Connect both devices to the same Wi-Fi / Hotspot.</div>
+    <div class="status" id="senderLog">Select a file and click "Create 6-Digit Room".</div>
   </div>
 
   <!-- RECEIVER VIEW -->
   <div class="card" id="receiverView" style="display: none;">
-    <h2>2. Local Drop (Receiver)</h2>
-    <label>Enter 6-Digit Room Code</label>
+    <h2>2. Receiver Mode</h2>
+    <label>Enter 6-Digit Code From Sender</label>
     <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
     
     <div class="btn-row">
-      <button class="action" id="btnRecvRun">Connect & Receive</button>
+      <button class="action" id="btnRecvRun">Connect & Stream</button>
       <button class="cancel-btn" id="btnRecvCancel">Cancel Transfer</button>
     </div>
 
@@ -88,34 +88,32 @@
       <span id="recvSpeedLabel">0.0 MB/s</span>
     </div>
     <progress id="recvProgress" value="0" max="100"></progress>
-    <div class="status" id="recvLog">Enter the code displayed on the phone to stream over local Wi-Fi.</div>
+    <div class="status" id="recvLog">Enter the 6-digit code shown on the sender device and click Connect.</div>
     <a class="btn-download" id="btnDownload">Save File to Laptop</a>
   </div>
 </div>
 
 <script>
-// 256 KB chunks ensure maximum throughput across local Wi-Fi chipsets
-const CHUNK_SIZE = 256 * 1024;
-
-// Direct LAN ICE configuration - forces direct local IP routing
-const LAN_ICE_CONFIG = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  iceCandidatePoolSize: 10
+const CHUNK_SIZE = 256 * 1024; // 256KB jumbo slices for direct local router/hotspot throughput
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" }
+  ]
 };
 
 let pc = null;
 let dataChannel = null;
 let controlChannel = null;
 let currentFile = null;
-let roomCode = "";
 let sseSource = null;
 let isCancelled = false;
 
-// Speed tracking variables
+// Speed tracking
 let lastTime = 0;
 let lastBytes = 0;
 
-// UI Tabs
+// Tab switcher
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
@@ -155,7 +153,7 @@ filePicker.addEventListener("change", () => {
   currentFile = filePicker.files[0];
   btnSenderRun.disabled = !currentFile;
   if (currentFile) {
-    senderLog.innerHTML = `Loaded: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024*1024)).toFixed(2)} GB). Click "Open Local Pipe".`;
+    senderLog.innerHTML = `Loaded: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024*1024)).toFixed(2)} GB). Click "Create 6-Digit Room".`;
   }
 });
 
@@ -168,13 +166,13 @@ btnSenderRun.addEventListener("click", async () => {
   senderProgressLabel.innerText = "Transfer: 0%";
   senderSpeedLabel.innerText = "0.0 MB/s";
 
-  roomCode = Math.floor(100000 + Math.random() * 900000).toString();
-  dispCode.innerText = roomCode;
-  senderLog.innerHTML = `Binding local socket for room <b>${roomCode}</b>...`;
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  dispCode.innerText = code;
+  senderLog.innerHTML = `Setting up 6-digit room <b>${code}</b>...`;
 
-  pc = new RTCPeerConnection(LAN_ICE_CONFIG);
+  pc = new RTCPeerConnection(ICE_CONFIG);
 
-  dataChannel = pc.createDataChannel("lanPipe", { ordered: true });
+  dataChannel = pc.createDataChannel("filePipe", { ordered: true });
   dataChannel.binaryType = "arraybuffer";
 
   controlChannel = pc.createDataChannel("ctrlPipe", { ordered: true });
@@ -193,24 +191,24 @@ btnSenderRun.addEventListener("click", async () => {
 
   pc.onicecandidate = async () => {
     if (pc.iceGatheringState === "complete") {
-      // Exchange small SDP handshake over lightweight broker
-      await fetch(`https://ntfy.sh/pxp_local_${roomCode}`, {
+      // Send offer to ephemeral channel
+      await fetch(`https://ntfy.sh/pxp_local_${code}`, {
         method: "POST",
         body: JSON.stringify({ role: "sender", desc: pack(pc.localDescription) })
       });
 
       senderLog.innerHTML = `
-        <span class="val">Local Pipe Ready!</span><br/>
-        Enter code <b>${roomCode}</b> on your laptop.<br/>
-        <i>Waiting for direct local link...</i>
+        <span class="val">Room Ready!</span><br/>
+        Tell receiver to enter code: <b>${code}</b><br/>
+        <i>Waiting for receiver to connect...</i>
       `;
 
-      listenForReceiver(roomCode);
+      listenForAnswer(code);
     }
   };
 });
 
-function listenForReceiver(code) {
+function listenForAnswer(code) {
   sseSource = new EventSource(`https://ntfy.sh/pxp_local_${code}/sse`);
   sseSource.onmessage = async (e) => {
     try {
@@ -221,12 +219,12 @@ function listenForReceiver(code) {
           sseSource.close();
           sseSource = null;
 
-          senderLog.innerHTML = `<span class="val">Connected to Laptop!</span> Punching direct LAN socket...`;
+          senderLog.innerHTML = `<span class="val">Receiver Connected!</span> Binding direct local connection...`;
           const answerDesc = unpack(payload.desc);
           await pc.setRemoteDescription(answerDesc);
 
           dataChannel.onopen = async () => {
-            senderLog.innerHTML = `<span class="val">Direct Pipe Established!</span> Pumping 256 KB frames...`;
+            senderLog.innerHTML = `<span class="val">Direct Pipe Open!</span> Streaming <b>${currentFile.name}</b>...`;
 
             controlChannel.send(JSON.stringify({
               type: "meta",
@@ -239,7 +237,6 @@ function listenForReceiver(code) {
             lastTime = performance.now();
             lastBytes = 0;
 
-            // 1MB threshold keeps Wi-Fi pipe completely saturated without overflow
             dataChannel.bufferedAmountLowThreshold = 1024 * 1024;
 
             while (offset < total) {
@@ -254,7 +251,6 @@ function listenForReceiver(code) {
               dataChannel.send(buf);
               offset += buf.byteLength;
 
-              // Speed & percentage calculation
               const now = performance.now();
               if (now - lastTime >= 500) {
                 const diffBytes = offset - lastBytes;
@@ -272,7 +268,7 @@ function listenForReceiver(code) {
 
             if (!isCancelled) {
               controlChannel.send(JSON.stringify({ type: "complete" }));
-              senderLog.innerHTML = `<span class="val">Transfer Complete!</span> 100% delivered to laptop.`;
+              senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Successfully delivered.`;
               btnSenderCancel.style.display = "none";
               senderSpeedLabel.innerText = "Done";
             }
@@ -314,7 +310,7 @@ let fileMeta = null;
 btnRecvRun.addEventListener("click", async () => {
   const code = recvCodeInput.value.trim();
   if (code.length !== 6) {
-    alert("Please enter the 6-digit code shown on the phone!");
+    alert("Please enter the complete 6-digit code shown on the sender's screen!");
     return;
   }
 
@@ -328,7 +324,7 @@ btnRecvRun.addEventListener("click", async () => {
   recvProgress.value = 0;
   recvProgressLabel.innerText = "Ingestion: 0%";
   recvSpeedLabel.innerText = "0.0 MB/s";
-  recvLog.innerHTML = `Handshaking with Phone (Room: ${code})...`;
+  recvLog.innerHTML = `Connecting to room <b>${code}</b>...`;
 
   try {
     const res = await fetch(`https://ntfy.sh/pxp_local_${code}/json?poll=1`);
@@ -351,13 +347,13 @@ btnRecvRun.addEventListener("click", async () => {
     }
 
     if (!offerDesc) {
-      recvLog.innerHTML = `<span class="err">Phone not found. Make sure you tapped "Open Local Pipe" on phone first!</span>`;
+      recvLog.innerHTML = `<span class="err">Room not found. Make sure you clicked "Create 6-Digit Room" on the sender first!</span>`;
       btnRecvRun.disabled = false;
       btnRecvCancel.style.display = "none";
       return;
     }
 
-    pc = new RTCPeerConnection(LAN_ICE_CONFIG);
+    pc = new RTCPeerConnection(ICE_CONFIG);
 
     pc.ondatachannel = (e) => {
       const ch = e.channel;
@@ -369,13 +365,13 @@ btnRecvRun.addEventListener("click", async () => {
             fileMeta = msg;
             lastTime = performance.now();
             lastBytes = 0;
-            recvLog.innerHTML = `Streaming <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024*1024)).toFixed(2)} GB) over Wi-Fi...`;
+            recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024*1024)).toFixed(2)} GB)...`;
           } else if (msg.type === "cancel") {
             isCancelled = true;
             cleanup();
-            recvLog.innerHTML = `<span class="err">Transfer cancelled by phone.</span>`;
+            recvLog.innerHTML = `<span class="err">Transfer cancelled by sender.</span>`;
           } else if (msg.type === "complete") {
-            recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Assembling binary...`;
+            recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Assembling file...`;
             const finalBlob = new Blob(receivedBuffers, { type: "application/octet-stream" });
             const url = URL.createObjectURL(finalBlob);
             btnDownload.href = url;
@@ -383,10 +379,10 @@ btnRecvRun.addEventListener("click", async () => {
             btnDownload.style.display = "block";
             btnDownload.innerText = `Save ${fileMeta.name} (${(finalBlob.size / (1024*1024*1024)).toFixed(2)} GB)`;
             btnRecvCancel.style.display = "none";
-            recvSpeedLabel.innerText = "Finished";
+            recvSpeedLabel.innerText = "Done";
           }
         };
-      } else if (ch.label === "lanPipe") {
+      } else if (ch.label === "filePipe") {
         dataChannel = ch;
         dataChannel.binaryType = "arraybuffer";
         dataChannel.onmessage = (ev) => {
@@ -394,7 +390,6 @@ btnRecvRun.addEventListener("click", async () => {
           receivedBuffers.push(ev.data);
           receivedTotal += ev.data.byteLength;
 
-          // Real-time receiver speedometer
           const now = performance.now();
           if (now - lastTime >= 500) {
             const diffBytes = receivedTotal - lastBytes;
