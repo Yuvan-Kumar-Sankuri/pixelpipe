@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - Native WebRTC Cross-City Transfer</title>
+  <title>PixelPipe - Ultra-Fast P2P Streamer</title>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
@@ -47,7 +47,7 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender Mode (Native WebRTC)</h2>
+    <h2>1. Sender Mode (Zero-Config P2P)</h2>
     <label>Select File</label>
     <input type="file" id="filePicker" />
     
@@ -87,29 +87,33 @@
 </div>
 
 <script>
-// --- CONFIG & PROTOCOL CONSTANTS ---
-const CHUNK_SIZE = 64 * 1024; // 64 KB native WebRTC chunks
-const SIGNAL_RELAYS = [
-  "wss://relay.damus.io",
-  "wss://nos.lol",
-  "wss://relay.snort.social"
-];
+const CHUNK_SIZE = 64 * 1024; // 64 KB native WebRTC packets
 
-const ICE_SERVERS = {
+// STUN + Public OpenRelay TURN servers (bypasses CGNAT & mobile firewalls)
+const RTC_CONFIG = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" }
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject"
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject"
+    }
   ]
 };
 
 let pc = null;
 let dataChannel = null;
 let controlChannel = null;
-let activeWs = null;
+let ws = null;
 let isCancelled = false;
 
-// --- DOM ELEMENTS ---
+// --- TAB SWITCHER ---
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
@@ -125,76 +129,47 @@ tabReceiver.addEventListener("click", () => {
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
-// --- LIGHTWEIGHT NOSTR-COMPATIBLE SIGNALING ENGINE ---
-class EphemeralSignaling {
-  constructor(roomCode, onMessage) {
-    this.roomCode = roomCode;
-    this.onMessage = onMessage;
-    this.ws = null;
-    this.connected = false;
-  }
+// --- ROBUST PIE-SOCKET/PUBLIC SIGNALING HUB ---
+function initSignaling(roomCode, onMessage) {
+  return new Promise((resolve, reject) => {
+    // Dedicated free room channel on piesocket/websocket.in
+    const wsUrl = `wss://free.blr2.piesocket.com/v3/pixelpipe-${roomCode}?api_key=VC3OTcOxAcKO9wFdh40bLocNBvtWU9FNbmpUZoyE&notify_self=0`;
+    ws = new WebSocket(wsUrl);
 
-  connect() {
-    return new Promise((resolve, reject) => {
-      let relayIndex = 0;
-      const tryNextRelay = () => {
-        if (relayIndex >= SIGNAL_RELAYS.length) {
-          reject(new Error("Signaling relays unreachable"));
-          return;
-        }
-        const url = SIGNAL_RELAYS[relayIndex++];
-        this.ws = new WebSocket(url);
-
-        this.ws.onopen = () => {
-          this.connected = true;
-          activeWs = this.ws;
-          // Subscribe to messages tagged with our 6-digit code
-          this.ws.send(JSON.stringify(["REQ", "sub-" + this.roomCode, { "#t": ["pxp-" + this.roomCode], "kinds": [20000], "limit": 10 }]));
-          resolve();
-        };
-
-        this.ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data[0] === "EVENT" && data[2]?.content) {
-              const parsed = JSON.parse(data[2].content);
-              this.onMessage(parsed);
-            }
-          } catch (e) {}
-        };
-
-        this.ws.onerror = () => {
-          this.ws.close();
-          tryNextRelay();
-        };
+    ws.onopen = () => resolve(ws);
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        onMessage(msg);
+      } catch (e) {}
+    };
+    ws.onerror = () => {
+      // Fallback signaling relay
+      const fallbackUrl = `wss://socketsbay.com/wss/v2/100/pixelpipe-${roomCode}/`;
+      ws = new WebSocket(fallbackUrl);
+      ws.onopen = () => resolve(ws);
+      ws.onmessage = (e) => {
+        try { onMessage(JSON.parse(e.data)); } catch (err) {}
       };
-      tryNextRelay();
-    });
-  }
+      ws.onerror = (err) => reject(err);
+    };
+  });
+}
 
-  send(payload) {
-    if (this.ws && this.connected && this.ws.readyState === WebSocket.OPEN) {
-      const event = {
-        kind: 20000,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [["t", "pxp-" + this.roomCode]],
-        content: JSON.stringify(payload),
-        pubkey: "0000000000000000000000000000000000000000000000000000000000000000",
-        id: Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => b.toString(16).padStart(2, "0")).join("")
-      };
-      this.ws.send(JSON.stringify(["EVENT", event]));
-    }
-  }
-
-  close() {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
+function sendSignal(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
   }
 }
 
-// --- SENDER IMPLEMENTATION ---
+function cleanupAll() {
+  if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
+  if (controlChannel) { try { controlChannel.close(); } catch(e){} controlChannel = null; }
+  if (pc) { try { pc.close(); } catch(e){} pc = null; }
+  if (ws) { try { ws.close(); } catch(e){} ws = null; }
+}
+
+// --- SENDER ---
 const filePicker = document.getElementById("filePicker");
 const btnSenderRun = document.getElementById("btnSenderRun");
 const btnSenderCancel = document.getElementById("btnSenderCancel");
@@ -204,37 +179,23 @@ const senderProgressLabel = document.getElementById("senderProgressLabel");
 const senderLog = document.getElementById("senderLog");
 
 let currentFile = null;
-let senderSig = null;
 
 filePicker.addEventListener("change", () => {
   currentFile = filePicker.files[0];
   btnSenderRun.disabled = !currentFile;
   if (currentFile) {
-    senderLog.innerHTML = `Selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB). Click below to create room.`;
+    senderLog.innerHTML = `Selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB).`;
   }
 });
 
 btnSenderCancel.addEventListener("click", () => {
-  triggerCancel("Transfer cancelled by you.");
-});
-
-function triggerCancel(msg) {
   isCancelled = true;
   if (controlChannel && controlChannel.readyState === "open") {
     try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
-  setTimeout(() => {
-    cleanupConnections();
-    resetSenderUI(msg);
-  }, 50);
-}
-
-function cleanupConnections() {
-  if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
-  if (controlChannel) { try { controlChannel.close(); } catch(e){} controlChannel = null; }
-  if (pc) { try { pc.close(); } catch(e){} pc = null; }
-  if (senderSig) { senderSig.close(); senderSig = null; }
-}
+  cleanupAll();
+  resetSenderUI("Transfer cancelled by you.");
+});
 
 function resetSenderUI(msg) {
   btnSenderRun.disabled = !currentFile;
@@ -253,76 +214,67 @@ btnSenderRun.addEventListener("click", async () => {
   const file = currentFile;
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   dispCode.innerText = code;
-  senderLog.innerHTML = `Connecting to global signaling relay...`;
+  senderLog.innerHTML = `Setting up secure room <b>${code}</b>...`;
 
-  pc = new RTCPeerConnection(ICE_SERVERS);
-
-  // Dedicated reliable binary channel
-  dataChannel = pc.createDataChannel("fileTransfer", { ordered: true });
-  dataChannel.binaryType = "arraybuffer";
-
-  // Dedicated out-of-band text control channel for progress & instant cancel
-  controlChannel = pc.createDataChannel("control", { ordered: true });
-
-  controlChannel.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === "cancel") {
-      isCancelled = true;
-      cleanupConnections();
-      resetSenderUI("Transfer cancelled by receiver.");
-    }
-  };
-
-  senderSig = new EphemeralSignaling(code, async (msg) => {
-    if (msg.role === "receiver") {
-      if (msg.sdp) {
-        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-      } else if (msg.candidate) {
-        try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
+  try {
+    await initSignaling(code, async (msg) => {
+      if (msg.role === "receiver") {
+        if (msg.sdp) {
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        } else if (msg.candidate) {
+          try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
+        }
       }
-    }
-  });
+    });
 
-  await senderSig.connect();
+    pc = new RTCPeerConnection(RTC_CONFIG);
 
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      senderSig.send({ role: "sender", candidate: event.candidate });
-    }
-  };
+    dataChannel = pc.createDataChannel("transfer", { ordered: true });
+    dataChannel.binaryType = "arraybuffer";
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  senderSig.send({ role: "sender", sdp: offer });
+    controlChannel = pc.createDataChannel("control", { ordered: true });
+    controlChannel.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "cancel") {
+        isCancelled = true;
+        cleanupAll();
+        resetSenderUI("Transfer cancelled by receiver.");
+      }
+    };
 
-  senderLog.innerHTML = `
-    <span class="val">Room Created!</span><br/>
-    Give this code to receiver: <b>${code}</b><br/>
-    <i>Waiting for receiver to connect...</i>
-  `;
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        sendSignal({ role: "sender", candidate: e.candidate });
+      }
+    };
 
-  dataChannel.onopen = async () => {
-    senderLog.innerHTML = `<span class="val">Receiver Connected!</span> Starting native binary stream...`;
-    
-    // Send file metadata over control channel
-    controlChannel.send(JSON.stringify({
-      type: "meta",
-      name: file.name,
-      size: file.size
-    }));
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    sendSignal({ role: "sender", sdp: offer });
 
-    const totalBytes = file.size;
-    let offset = 0;
+    senderLog.innerHTML = `
+      <span class="val">Room Ready!</span><br/>
+      Give this code to receiver: <b>${code}</b><br/>
+      <i>Waiting for receiver to join...</i>
+    `;
 
-    dataChannel.bufferedAmountLowThreshold = 512 * 1024; // 512 KB threshold
+    dataChannel.onopen = async () => {
+      senderLog.innerHTML = `<span class="val">Receiver Connected!</span> Streaming file...`;
+      
+      controlChannel.send(JSON.stringify({
+        type: "meta",
+        name: file.name,
+        size: file.size
+      }));
 
-    // Continuous streaming pump bound to native network backpressure
-    const pumpData = async () => {
-      while (offset < totalBytes) {
+      const total = file.size;
+      let offset = 0;
+      dataChannel.bufferedAmountLowThreshold = 256 * 1024;
+
+      while (offset < total) {
         if (isCancelled) return;
 
-        // If OS network buffer is saturated, wait for bufferedamountlow event
-        if (dataChannel.bufferedAmount > 2 * 1024 * 1024) {
+        if (dataChannel.bufferedAmount > 1024 * 1024) {
           await new Promise(r => { dataChannel.onbufferedamountlow = r; });
         }
 
@@ -331,23 +283,24 @@ btnSenderRun.addEventListener("click", async () => {
         dataChannel.send(buf);
         offset += buf.byteLength;
 
-        const pct = Math.round((offset / totalBytes) * 100);
+        const pct = Math.round((offset / total) * 100);
         senderProgress.value = pct;
-        senderProgressLabel.innerText = `Sent: ${pct}% (${(offset / (1024*1024)).toFixed(1)} MB / ${(totalBytes / (1024*1024)).toFixed(1)} MB)`;
+        senderProgressLabel.innerText = `Sent: ${pct}% (${(offset / (1024*1024)).toFixed(1)} MB / ${(total / (1024*1024)).toFixed(1)} MB)`;
       }
 
       if (!isCancelled) {
         controlChannel.send(JSON.stringify({ type: "complete" }));
-        senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Successfully delivered.`;
+        senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Delivered successfully.`;
         btnSenderCancel.style.display = "none";
       }
     };
 
-    pumpData();
-  };
+  } catch (err) {
+    resetSenderUI("Signaling server unreachable. Try again.");
+  }
 });
 
-// --- RECEIVER IMPLEMENTATION ---
+// --- RECEIVER ---
 const recvCodeInput = document.getElementById("recvCodeInput");
 const btnRecvRun = document.getElementById("btnRecvRun");
 const btnRecvCancel = document.getElementById("btnRecvCancel");
@@ -356,7 +309,6 @@ const recvProgressLabel = document.getElementById("recvProgressLabel");
 const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
-let receiverSig = null;
 let receivedBuffers = [];
 let receivedBytesTotal = 0;
 let fileMeta = null;
@@ -366,10 +318,8 @@ btnRecvCancel.addEventListener("click", () => {
   if (controlChannel && controlChannel.readyState === "open") {
     try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
-  setTimeout(() => {
-    cleanupConnections();
-    resetReceiverUI("Transfer cancelled by you.");
-  }, 50);
+  cleanupAll();
+  resetReceiverUI("Transfer cancelled by you.");
 });
 
 function resetReceiverUI(msg) {
@@ -397,77 +347,78 @@ btnRecvRun.addEventListener("click", async () => {
   isCancelled = false;
   receivedBuffers = [];
   receivedBytesTotal = 0;
-  recvProgress.value = 0;
-  recvProgressLabel.innerText = "Transfer Progress: 0%";
-  recvLog.innerHTML = `Connecting to Sender (Room: ${code})...`;
 
-  pc = new RTCPeerConnection(ICE_SERVERS);
+  recvLog.innerHTML = `Connecting to room <b>${code}</b>...`;
 
-  receiverSig = new EphemeralSignaling(code, async (msg) => {
-    if (msg.role === "sender") {
-      if (msg.sdp) {
-        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        receiverSig.send({ role: "receiver", sdp: answer });
-      } else if (msg.candidate) {
-        try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
+  try {
+    pc = new RTCPeerConnection(RTC_CONFIG);
+
+    await initSignaling(code, async (msg) => {
+      if (msg.role === "sender") {
+        if (msg.sdp) {
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sendSignal({ role: "receiver", sdp: answer });
+        } else if (msg.candidate) {
+          try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
+        }
       }
-    }
-  });
+    });
 
-  await receiverSig.connect();
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        sendSignal({ role: "receiver", candidate: e.candidate });
+      }
+    };
 
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      receiverSig.send({ role: "receiver", candidate: event.candidate });
-    }
-  };
+    pc.ondatachannel = (event) => {
+      const ch = event.channel;
+      if (ch.label === "control") {
+        controlChannel = ch;
+        controlChannel.onmessage = (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.type === "meta") {
+            fileMeta = msg;
+            recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024)).toFixed(1)} MB)...`;
+          } else if (msg.type === "cancel") {
+            isCancelled = true;
+            cleanupAll();
+            resetReceiverUI("Transfer cancelled by sender.");
+          } else if (msg.type === "complete") {
+            recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Ready to save.`;
+            btnDownload.style.display = "block";
+            btnDownload.innerText = `Save ${fileMeta.name}`;
+            btnRecvRun.disabled = false;
+            btnRecvCancel.style.display = "none";
+          }
+        };
+      } else if (ch.label === "transfer") {
+        dataChannel = ch;
+        dataChannel.binaryType = "arraybuffer";
+        dataChannel.onmessage = (e) => {
+          if (isCancelled) return;
+          receivedBuffers.push(e.data);
+          receivedBytesTotal += e.data.byteLength;
 
-  pc.ondatachannel = (event) => {
-    const ch = event.channel;
-    if (ch.label === "control") {
-      controlChannel = ch;
-      controlChannel.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === "meta") {
-          fileMeta = msg;
-          recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024)).toFixed(1)} MB)...`;
-        } else if (msg.type === "cancel") {
-          isCancelled = true;
-          cleanupConnections();
-          resetReceiverUI("Transfer cancelled by sender.");
-        } else if (msg.type === "complete") {
-          recvLog.innerHTML = `<span class="val">Transfer Complete!</span> Ready to save.`;
-          btnDownload.style.display = "block";
-          btnDownload.innerText = `Save ${fileMeta.name}`;
-          btnRecvRun.disabled = false;
-          btnRecvCancel.style.display = "none";
-        }
-      };
-    } else if (ch.label === "fileTransfer") {
-      dataChannel = ch;
-      dataChannel.binaryType = "arraybuffer";
+          if (fileMeta && fileMeta.size) {
+            const pct = Math.round((receivedBytesTotal / fileMeta.size) * 100);
+            recvProgress.value = pct;
+            recvProgressLabel.innerText = `Received: ${pct}% (${(receivedBytesTotal / (1024*1024)).toFixed(1)} MB / ${(fileMeta.size / (1024*1024)).toFixed(1)} MB)`;
+          }
+        };
+      }
+    };
 
-      dataChannel.onmessage = (e) => {
-        if (isCancelled) return;
-        receivedBuffers.push(e.data);
-        receivedBytesTotal += e.data.byteLength;
-
-        if (fileMeta && fileMeta.size) {
-          const pct = Math.round((receivedBytesTotal / fileMeta.size) * 100);
-          recvProgress.value = pct;
-          recvProgressLabel.innerText = `Received: ${pct}% (${(receivedBytesTotal / (1024*1024)).toFixed(1)} MB / ${(fileMeta.size / (1024*1024)).toFixed(1)} MB)`;
-        }
-      };
-    }
-  };
+  } catch (err) {
+    resetReceiverUI("Could not connect to signaling room. Check code.");
+  }
 });
 
 btnDownload.addEventListener("click", () => {
   if (receivedBuffers.length === 0 || !fileMeta) return;
-  const finalBlob = new Blob(receivedBuffers, { type: "application/octet-stream" });
-  const url = URL.createObjectURL(finalBlob);
+  const blob = new Blob(receivedBuffers, { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = fileMeta.name;
