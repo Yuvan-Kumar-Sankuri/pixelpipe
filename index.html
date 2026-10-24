@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PixelPipe - Bulletproof Large File Transfer</title>
+  <title>PixelPipe - High-Speed P2P Room Transfer</title>
   <style>
     :root {
       --bg: #090d16; --card: #131b2e; --border: #233354;
@@ -11,7 +11,7 @@
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 20px; display: flex; justify-content: center; }
-    .wrapper { max-width: 620px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
+    .wrapper { max-width: 600px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
     .mode-switch { display: grid; grid-template-columns: 1fr 1fr; background: #0b1120; border: 1px solid var(--border); border-radius: 8px; padding: 4px; gap: 4px; }
     .mode-btn { padding: 12px; font-weight: bold; border: none; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; transition: 0.2s; font-size: 14px; }
     .mode-btn.active { background: var(--accent); color: #000; }
@@ -19,7 +19,7 @@
     h2 { font-size: 16px; color: var(--accent); }
     label { font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: bold; }
     input[type="file"] { padding: 10px; background: #0b1120; border: 1px solid var(--border); border-radius: 6px; color: #fff; width: 100%; }
-    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 20px; text-align: center; letter-spacing: 3px; font-weight: bold; width: 100%; }
+    input[type="text"] { padding: 12px; background: #0b1120; border: 2px solid var(--border); border-radius: 6px; color: #fff; font-size: 24px; text-align: center; letter-spacing: 6px; font-weight: bold; width: 100%; }
     input[type="text"]:focus { border-color: var(--accent); outline: none; }
     
     .btn-row { display: flex; gap: 10px; }
@@ -29,18 +29,20 @@
     button.cancel-btn:hover { filter: brightness(1.15); }
 
     .code-display { background: #0b1120; border: 2px dashed var(--green); border-radius: 8px; padding: 14px; text-align: center; }
-    .code-val { font-size: 30px; font-weight: 900; color: var(--green); letter-spacing: 4px; margin-top: 4px; word-break: break-all; }
+    .code-val { font-size: 32px; font-weight: 900; color: var(--green); letter-spacing: 6px; margin-top: 4px; }
+    .copy-link-btn { margin-top: 8px; background: #1e293b; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; display: none; }
+
     .status { font-size: 12px; color: var(--muted); line-height: 1.5; background: #0b1120; padding: 10px; border-radius: 6px; border: 1px solid var(--border); }
     .val { color: var(--green); font-weight: bold; }
     .err { color: var(--red); font-weight: bold; }
     progress { width: 100%; height: 8px; accent-color: var(--green); }
     .btn-download { background: var(--green); color: #000; display: none; padding: 14px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; text-align: center; text-decoration: none; }
-    .copy-btn { margin-top: 8px; background: #1e293b; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; display: none; }
   </style>
 </head>
 <body>
 
 <div class="wrapper">
+  <!-- Mode Switcher -->
   <div class="mode-switch">
     <button class="mode-btn active" id="tabSender">Sender Mode</button>
     <button class="mode-btn" id="tabReceiver">Receiver Mode</button>
@@ -48,48 +50,62 @@
 
   <!-- SENDER VIEW -->
   <div class="card" id="senderView">
-    <h2>1. Sender Mode (Cross-City / Any Size)</h2>
-    <label>Select File (Supports Large Files)</label>
+    <h2>1. Sender (Create Room)</h2>
+    <label>Select File (Supports 4 GB+)</label>
     <input type="file" id="filePicker" />
     
     <div class="btn-row">
-      <button class="action" id="btnSenderRun" disabled>Upload & Generate Code</button>
+      <button class="action" id="btnSenderRun" disabled>Create Room</button>
       <button class="cancel-btn" id="btnSenderCancel">Cancel Transfer</button>
     </div>
 
-    <label id="senderProgressLabel">Upload Progress: 0%</label>
-    <progress id="senderProgress" value="0" max="100"></progress>
-
     <div class="code-display">
-      <div style="font-size:11px; color:var(--muted);">SHARE CODE FOR RECEIVER</div>
+      <div style="font-size:11px; color:var(--muted);">ROOM TRANSFER CODE</div>
       <div class="code-val" id="dispCode">------</div>
-      <button class="copy-btn" id="btnCopyCode">Copy Full Link</button>
+      <button class="copy-link-btn" id="btnCopyLink">Copy Direct Join Link</button>
     </div>
 
-    <div class="status" id="senderLog">Select a file and click Upload.</div>
+    <label id="senderProgressLabel">Transfer Progress: 0%</label>
+    <progress id="senderProgress" value="0" max="100"></progress>
+    <div class="status" id="senderLog">Select a file and click "Create Room" to begin.</div>
   </div>
 
   <!-- RECEIVER VIEW -->
   <div class="card" id="receiverView" style="display: none;">
-    <h2>2. Receiver Mode</h2>
-    <label>Enter Code / URL ID</label>
-    <input type="text" id="recvCodeInput" placeholder="Enter code or paste link" />
+    <h2>2. Receiver (Join Room)</h2>
+    <label>Enter 6-Digit Room Code</label>
+    <input type="text" id="recvCodeInput" maxlength="6" placeholder="------" />
     
     <div class="btn-row">
-      <button class="action" id="btnRecvRun">Download File</button>
-      <button class="cancel-btn" id="btnRecvCancel">Cancel</button>
+      <button class="action" id="btnRecvRun">Join Room & Stream</button>
+      <button class="cancel-btn" id="btnRecvCancel">Cancel Transfer</button>
     </div>
 
-    <label id="recvProgressLabel">Status: Ready</label>
+    <label id="recvProgressLabel">Download Progress: 0%</label>
     <progress id="recvProgress" value="0" max="100"></progress>
-
-    <div class="status" id="recvLog">Enter the code received from sender and click Download.</div>
-    <a class="btn-download" id="btnDownload" target="_blank" rel="noopener noreferrer">Save File to Device</a>
+    <div class="status" id="recvLog">Enter the 6-digit code or open a direct join link.</div>
+    <a class="btn-download" id="btnDownload">Save File to Device</a>
   </div>
 </div>
 
 <script>
-// UI Tab Switcher
+const CHUNK_SIZE = 64 * 1024; // 64 KB native WebRTC chunk
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" }
+  ]
+};
+
+let pc = null;
+let dataChannel = null;
+let controlChannel = null;
+let currentFile = null;
+let roomCode = "";
+let sseSource = null;
+let isCancelled = false;
+
+// Tabs
 const tabSender = document.getElementById("tabSender");
 const tabReceiver = document.getElementById("tabReceiver");
 const senderView = document.getElementById("senderView");
@@ -105,127 +121,173 @@ tabReceiver.addEventListener("click", () => {
   receiverView.style.display = "flex"; senderView.style.display = "none";
 });
 
-let senderXhr = null;
-let generatedShareUrl = "";
-
-// Auto-fill code if opened with URL hash (#CODE)
+// Auto-fill from URL hash if opened via share link
 window.addEventListener("DOMContentLoaded", () => {
   if (window.location.hash) {
-    const rawHash = window.location.hash.replace("#", "").trim();
-    if (rawHash) {
+    const hash = window.location.hash.replace("#", "").trim();
+    if (hash.length === 6) {
       tabReceiver.click();
-      document.getElementById("recvCodeInput").value = rawHash;
+      document.getElementById("recvCodeInput").value = hash;
     }
   }
 });
+
+function cleanup() {
+  if (sseSource) { sseSource.close(); sseSource = null; }
+  if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
+  if (controlChannel) { try { controlChannel.close(); } catch(e){} controlChannel = null; }
+  if (pc) { try { pc.close(); } catch(e){} pc = null; }
+}
+
+function pack(desc) { return JSON.stringify({ t: desc.type, s: desc.sdp }); }
+function unpack(str) { const d = JSON.parse(str); return new RTCSessionDescription({ type: d.t, s: d.s }); }
 
 // --- SENDER ---
 const filePicker = document.getElementById("filePicker");
 const btnSenderRun = document.getElementById("btnSenderRun");
 const btnSenderCancel = document.getElementById("btnSenderCancel");
 const dispCode = document.getElementById("dispCode");
-const btnCopyCode = document.getElementById("btnCopyCode");
+const btnCopyLink = document.getElementById("btnCopyLink");
 const senderProgress = document.getElementById("senderProgress");
 const senderProgressLabel = document.getElementById("senderProgressLabel");
 const senderLog = document.getElementById("senderLog");
-
-let currentFile = null;
 
 filePicker.addEventListener("change", () => {
   currentFile = filePicker.files[0];
   btnSenderRun.disabled = !currentFile;
   if (currentFile) {
-    senderLog.innerHTML = `Selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB). Click button below.`;
+    senderLog.innerHTML = `Selected: <b>${currentFile.name}</b> (${(currentFile.size / (1024*1024)).toFixed(1)} MB). Click Create Room.`;
   }
+});
+
+btnSenderRun.addEventListener("click", async () => {
+  cleanup();
+  isCancelled = false;
+  btnSenderRun.disabled = true;
+  btnSenderCancel.style.display = "block";
+  btnCopyLink.style.display = "none";
+  senderProgress.value = 0;
+  senderProgressLabel.innerText = "Transfer Progress: 0%";
+
+  roomCode = Math.floor(100000 + Math.random() * 900000).toString();
+  dispCode.innerText = roomCode;
+  btnCopyLink.style.display = "inline-block";
+  senderLog.innerHTML = `Setting up room <b>${roomCode}</b>...`;
+
+  pc = new RTCPeerConnection(ICE_CONFIG);
+
+  dataChannel = pc.createDataChannel("pipe", { ordered: true });
+  dataChannel.binaryType = "arraybuffer";
+
+  controlChannel = pc.createDataChannel("ctrl", { ordered: true });
+  controlChannel.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "cancel") {
+      isCancelled = true;
+      cleanup();
+      btnSenderCancel.style.display = "none";
+      senderLog.innerHTML = `<span class="err">Transfer cancelled by receiver.</span>`;
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  pc.onicecandidate = async () => {
+    if (pc.iceGatheringState === "complete") {
+      // Broadcast offer to room topic
+      await fetch(`https://ntfy.sh/pxp_room_${roomCode}`, {
+        method: "POST",
+        body: JSON.stringify({ role: "sender", desc: pack(pc.localDescription) })
+      });
+
+      senderLog.innerHTML = `
+        <span class="val">Room Ready!</span><br/>
+        Share code <b>${roomCode}</b> with receiver.<br/>
+        <i>Waiting for receiver to join...</i>
+      `;
+
+      // Listen for receiver's answer
+      listenForAnswer(roomCode);
+    }
+  };
+});
+
+function listenForAnswer(code) {
+  sseSource = new EventSource(`https://ntfy.sh/pxp_room_${code}/sse`);
+  sseSource.onmessage = async (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.event === "message" && data.message) {
+        const payload = JSON.parse(data.message);
+        if (payload.role === "receiver") {
+          sseSource.close();
+          sseSource = null;
+
+          senderLog.innerHTML = `<span class="val">Receiver Joined!</span> Opening direct P2P data pipe...`;
+          const answerDesc = unpack(payload.desc);
+          await pc.setRemoteDescription(answerDesc);
+
+          dataChannel.onopen = async () => {
+            senderLog.innerHTML = `<span class="val">Connected!</span> Streaming <b>${currentFile.name}</b>...`;
+            
+            controlChannel.send(JSON.stringify({
+              type: "meta",
+              name: currentFile.name,
+              size: currentFile.size
+            }));
+
+            const total = currentFile.size;
+            let offset = 0;
+            dataChannel.bufferedAmountLowThreshold = 256 * 1024;
+
+            while (offset < total) {
+              if (isCancelled) return;
+
+              if (dataChannel.bufferedAmount > 1024 * 1024) {
+                await new Promise(r => { dataChannel.onbufferedamountlow = r; });
+              }
+
+              const slice = currentFile.slice(offset, offset + CHUNK_SIZE);
+              const buf = await slice.arrayBuffer();
+              dataChannel.send(buf);
+              offset += buf.byteLength;
+
+              const pct = Math.round((offset / total) * 100);
+              senderProgress.value = pct;
+              senderProgressLabel.innerText = `Sent: ${pct}% (${(offset / (1024*1024)).toFixed(1)} MB / ${(total / (1024*1024)).toFixed(1)} MB)`;
+            }
+
+            if (!isCancelled) {
+              controlChannel.send(JSON.stringify({ type: "complete" }));
+              senderLog.innerHTML = `<span class="val">Transfer Complete!</span> Successfully delivered.`;
+              btnSenderCancel.style.display = "none";
+            }
+          };
+        }
+      }
+    } catch (err) {}
+  };
+}
+
+btnCopyLink.addEventListener("click", () => {
+  const url = `${window.location.origin}${window.location.pathname}#${roomCode}`;
+  navigator.clipboard.writeText(url);
+  btnCopyLink.innerText = "Copied Direct Link!";
+  setTimeout(() => { btnCopyLink.innerText = "Copy Direct Join Link"; }, 2000);
 });
 
 btnSenderCancel.addEventListener("click", () => {
-  if (senderXhr) {
-    senderXhr.abort();
-    senderXhr = null;
+  isCancelled = true;
+  if (controlChannel && controlChannel.readyState === "open") {
+    try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
   }
+  cleanup();
   btnSenderRun.disabled = !currentFile;
   btnSenderCancel.style.display = "none";
-  dispCode.innerText = "------";
-  btnCopyCode.style.display = "none";
   senderProgress.value = 0;
-  senderProgressLabel.innerText = "Upload Progress: 0%";
-  senderLog.innerHTML = `<span class="err">Upload cancelled.</span>`;
-});
-
-btnSenderRun.addEventListener("click", () => {
-  btnSenderRun.disabled = true;
-  btnSenderCancel.style.display = "block";
-  btnCopyCode.style.display = "none";
-  dispCode.innerText = "------";
-  senderProgress.value = 0;
-  senderProgressLabel.innerText = "Starting upload... 0%";
-  senderLog.innerHTML = "Uploading file to high-speed relay...";
-
-  const formData = new FormData();
-  formData.append("file", currentFile);
-
-  senderXhr = new XMLHttpRequest();
-  senderXhr.open("POST", "https://tmpfiles.org/api/v1/upload", true);
-
-  senderXhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) {
-      const pct = Math.round((e.loaded / e.total) * 100);
-      senderProgress.value = pct;
-      senderProgressLabel.innerText = `Uploading: ${pct}% (${(e.loaded / (1024*1024)).toFixed(1)} MB / ${(e.total / (1024*1024)).toFixed(1)} MB)`;
-    }
-  };
-
-  senderXhr.onload = () => {
-    try {
-      if (senderXhr.status === 200) {
-        const res = JSON.parse(senderXhr.responseText);
-        const originalUrl = res.data.url;
-        // Transform view link into direct binary download link
-        const directDlUrl = originalUrl.replace("tmpfiles.org/", "tmpfiles.org/dl/");
-
-        // Extract unique ID from URL (e.g. https://tmpfiles.org/dl/12345/filename -> 12345/filename)
-        const fileKey = directDlUrl.split("/dl/")[1];
-        
-        // Compact 6-to-8 character share code encoded via base64url
-        const transferCode = btoa(fileKey).replace(/=/g, "");
-
-        generatedShareUrl = `${window.location.origin}${window.location.pathname}#${transferCode}`;
-
-        // IMMEDIATELY DISPLAY CODE
-        dispCode.innerText = transferCode;
-        btnCopyCode.style.display = "inline-block";
-        senderProgress.value = 100;
-        senderProgressLabel.innerText = "Upload Completed: 100%";
-        senderLog.innerHTML = `
-          <span class="val">Upload Complete!</span><br/>
-          Share code: <b>${transferCode}</b><br/>
-          Receiver can type this code in Receiver Mode, or open the copied link.
-        `;
-        btnSenderCancel.style.display = "none";
-      } else {
-        throw new Error("Server responded with code " + senderXhr.status);
-      }
-    } catch (err) {
-      senderLog.innerHTML = `<span class="err">Failed to complete: ${err.message}</span>`;
-      btnSenderRun.disabled = false;
-      btnSenderCancel.style.display = "none";
-    }
-  };
-
-  senderXhr.onerror = () => {
-    senderLog.innerHTML = `<span class="err">Network error during upload. Please retry.</span>`;
-    btnSenderRun.disabled = false;
-    btnSenderCancel.style.display = "none";
-  };
-
-  senderXhr.send(formData);
-});
-
-btnCopyCode.addEventListener("click", () => {
-  navigator.clipboard.writeText(generatedShareUrl || dispCode.innerText);
-  btnCopyCode.innerText = "Copied to Clipboard!";
-  setTimeout(() => { btnCopyCode.innerText = "Copy Full Link"; }, 2000);
+  senderProgressLabel.innerText = "Transfer Progress: 0%";
+  senderLog.innerHTML = `<span class="err">Transfer cancelled by you.</span>`;
 });
 
 // --- RECEIVER ---
@@ -237,55 +299,132 @@ const recvProgressLabel = document.getElementById("recvProgressLabel");
 const recvLog = document.getElementById("recvLog");
 const btnDownload = document.getElementById("btnDownload");
 
-btnRecvCancel.addEventListener("click", () => {
-  btnRecvRun.disabled = false;
-  btnRecvCancel.style.display = "none";
-  btnDownload.style.display = "none";
-  recvProgress.value = 0;
-  recvProgressLabel.innerText = "Status: Ready";
-  recvLog.innerHTML = `<span class="err">Operation cancelled.</span>`;
-});
+let receivedBuffers = [];
+let receivedTotal = 0;
+let fileMeta = null;
 
-btnRecvRun.addEventListener("click", () => {
-  let inputVal = recvCodeInput.value.trim();
-  if (!inputVal) {
-    alert("Please enter the code or link from the sender!");
+btnRecvRun.addEventListener("click", async () => {
+  const code = recvCodeInput.value.trim();
+  if (code.length !== 6) {
+    alert("Please enter the complete 6-digit room code!");
     return;
   }
 
-  // If a full link was pasted, extract the code portion
-  if (inputVal.includes("#")) {
-    inputVal = inputVal.split("#")[1];
-  }
-
+  cleanup();
+  isCancelled = false;
   btnRecvRun.disabled = true;
   btnRecvCancel.style.display = "block";
   btnDownload.style.display = "none";
-  recvProgress.value = 50;
-  recvProgressLabel.innerText = "Resolving code...";
+  receivedBuffers = [];
+  receivedTotal = 0;
+  recvProgress.value = 0;
+  recvProgressLabel.innerText = "Download Progress: 0%";
+  recvLog.innerHTML = `Looking up room <b>${code}</b>...`;
 
   try {
-    // Decode transfer code back to URL key
-    const fileKey = atob(inputVal);
-    const downloadUrl = `https://tmpfiles.org/dl/${fileKey}`;
+    // Fetch sender's offer from room
+    const res = await fetch(`https://ntfy.sh/pxp_room_${code}/json?poll=1`);
+    const text = await res.text();
+    let offerDesc = null;
 
-    recvProgress.value = 100;
-    recvProgressLabel.innerText = "Ready to download!";
-    btnDownload.href = downloadUrl;
-    btnDownload.style.display = "block";
-    btnDownload.innerText = "Save File to Device";
-    
-    recvLog.innerHTML = `<span class="val">File Ready!</span> Click the button below to download.`;
-    btnRecvRun.disabled = false;
-    btnRecvCancel.style.display = "none";
+    if (text) {
+      const lines = text.trim().split("\n");
+      for (let line of lines) {
+        try {
+          const item = JSON.parse(line);
+          if (item.event === "message" && item.message) {
+            const payload = JSON.parse(item.message);
+            if (payload.role === "sender") {
+              offerDesc = unpack(payload.desc);
+            }
+          }
+        } catch(e) {}
+      }
+    }
+
+    if (!offerDesc) {
+      recvLog.innerHTML = `<span class="err">Room not found. Check code or ensure sender created the room first.</span>`;
+      btnRecvRun.disabled = false;
+      btnRecvCancel.style.display = "none";
+      return;
+    }
+
+    pc = new RTCPeerConnection(ICE_CONFIG);
+
+    pc.ondatachannel = (e) => {
+      const ch = e.channel;
+      if (ch.label === "ctrl") {
+        controlChannel = ch;
+        controlChannel.onmessage = (ev) => {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "meta") {
+            fileMeta = msg;
+            recvLog.innerHTML = `Receiving <b>${fileMeta.name}</b> (${(fileMeta.size / (1024*1024)).toFixed(1)} MB)...`;
+          } else if (msg.type === "cancel") {
+            isCancelled = true;
+            cleanup();
+            recvLog.innerHTML = `<span class="err">Transfer cancelled by sender.</span>`;
+          } else if (msg.type === "complete") {
+            recvLog.innerHTML = `<span class="val">Download Complete!</span> Click save below.`;
+            const finalBlob = new Blob(receivedBuffers, { type: "application/octet-stream" });
+            const url = URL.createObjectURL(finalBlob);
+            btnDownload.href = url;
+            btnDownload.download = fileMeta.name;
+            btnDownload.style.display = "block";
+            btnDownload.innerText = `Save ${fileMeta.name} to Device`;
+            btnRecvCancel.style.display = "none";
+          }
+        };
+      } else if (ch.label === "pipe") {
+        dataChannel = ch;
+        dataChannel.binaryType = "arraybuffer";
+        dataChannel.onmessage = (ev) => {
+          if (isCancelled) return;
+          receivedBuffers.push(ev.data);
+          receivedTotal += ev.data.byteLength;
+
+          if (fileMeta && fileMeta.size) {
+            const pct = Math.round((receivedTotal / fileMeta.size) * 100);
+            recvProgress.value = pct;
+            recvProgressLabel.innerText = `Received: ${pct}% (${(receivedTotal / (1024*1024)).toFixed(1)} MB / ${(fileMeta.size / (1024*1024)).toFixed(1)} MB)`;
+          }
+        };
+      }
+    };
+
+    await pc.setRemoteDescription(offerDesc);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    pc.onicecandidate = async () => {
+      if (pc.iceGatheringState === "complete") {
+        // Send answer back to room
+        await fetch(`https://ntfy.sh/pxp_room_${code}`, {
+          method: "POST",
+          body: JSON.stringify({ role: "receiver", desc: pack(pc.localDescription) })
+        });
+        recvLog.innerHTML = `<span class="val">Handshake sent!</span> Connecting directly to sender...`;
+      }
+    };
 
   } catch (err) {
-    recvProgress.value = 0;
-    recvProgressLabel.innerText = "Error";
-    recvLog.innerHTML = `<span class="err">Invalid code format. Make sure you entered the correct code.</span>`;
+    recvLog.innerHTML = `<span class="err">Connection failed: ${err.message}</span>`;
     btnRecvRun.disabled = false;
     btnRecvCancel.style.display = "none";
   }
+});
+
+btnRecvCancel.addEventListener("click", () => {
+  isCancelled = true;
+  if (controlChannel && controlChannel.readyState === "open") {
+    try { controlChannel.send(JSON.stringify({ type: "cancel" })); } catch (e) {}
+  }
+  cleanup();
+  btnRecvRun.disabled = false;
+  btnRecvCancel.style.display = "none";
+  recvProgress.value = 0;
+  recvProgressLabel.innerText = "Download Progress: 0%";
+  recvLog.innerHTML = `<span class="err">Transfer cancelled by you.</span>`;
 });
 </script>
 </body>
